@@ -42,7 +42,15 @@ export default async function handler(req, res) {
     const b64 = `data:image/jpeg;base64,${Buffer.from(bin).toString("base64")}`;
 
     return res.status(200).json({ ok: true, previewBase64: b64, sourceUrl: up.secure_url });
-  } catch (e) {
+  } catch (e) 
+  export default function handler(req, res) {
+  res.status(200).json({
+    success: true,
+    message: "✅ API /preview-test funcionando correctamente",
+    method: req.method
+  });
+}
+{
     console.error(e);
     return res.status(500).json({ ok: false, error: e.message });
   }
