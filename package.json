@@ -2,8 +2,10 @@
   "name": "mora2-hf-api",
   "version": "1.0.0",
   "type": "module",
+  "private": true,
+  "engines": { "node": ">=18" },
   "dependencies": {
-    "cloudinary": "^1.41.3",
-    "node-fetch": "^3.3.2"
+    "openai": "^4.59.0",
+    "cloudinary": "^1.41.3"
   }
 }
