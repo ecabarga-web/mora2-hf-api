@@ -10,7 +10,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// Aumenta el límite por si las bases64 vienen “pesadas”
+// límite para el body (por si pruebas con base64)
 export const config = { api: { bodyParser: { sizeLimit: "7mb" } } };
 
 const STYLE_PROMPTS = {
@@ -24,16 +24,20 @@ const STYLE_PROMPTS = {
     "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
 };
 
-// helper: sube un Buffer a Cloudinary usando stream
-function uploadBufferToCloudinary(buf, folder = "mora2/previews_src", mime = "image/jpeg") {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { folder, overwrite: true, resource_type: "image" },
-      (err, result) => (err ? reject(err) : resolve(result))
-    );
-    // importante: indicar el mimetype en el stream si el cliente lo manda
-    stream.end(buf);
-  });
+function normalizeBase64(input) {
+  // Si viene vacío
+  if (!input || typeof input !== "string") return null;
+
+  // Si ya es data URI
+  if (input.startsWith("data:image/")) return input;
+
+  // Si parece base64 "pura", le ponemos prefijo jpg por defecto
+  const b64re = /^[A-Za-z0-9+/=\s]+$/;
+  if (b64re.test(input)) {
+    return `data:image/jpeg;base64,${input.replace(/\s/g, "")}`;
+  }
+
+  return null;
 }
 
 export default async function handler(req, res) {
@@ -42,39 +46,34 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { imageBase64, style = "urban" } = req.body || {};
-    if (!imageBase64 || typeof imageBase64 !== "string") {
-      return res.status(400).json({ ok: false, error: "imageBase64 required" });
+    const { imageBase64, imageUrl, style = "urban" } = req.body || {};
+
+    // 1) Subir ORIGINAL a Cloudinary (acepta base64 data-uri o URL remota)
+    let uploadSource;
+
+    if (imageUrl && /^https?:\/\//i.test(imageUrl)) {
+      uploadSource = imageUrl; // Cloudinary puede “fetch” por URL directamente
+    } else {
+      const dataUri = normalizeBase64(imageBase64);
+      if (!dataUri) {
+        return res
+          .status(400)
+          .json({ ok: false, error: "Invalid base64 or missing image" });
+      }
+      uploadSource = dataUri;
     }
 
-    // Aceptamos tanto data URL como base64 “pelado”
-    // Intentamos extraer mime y el payload
-    let mime = "image/jpeg";
-    let b64 = imageBase64;
-
-    const dataUrlMatch = imageBase64.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/);
-    if (dataUrlMatch) {
-      mime = dataUrlMatch[1];
-      b64 = dataUrlMatch[2];
-    }
-
-    // Validación básica
-    if (!b64 || /[^A-Za-z0-9+/=]/.test(b64.replace(/\s/g, ""))) {
-      return res.status(400).json({ ok: false, error: "Invalid base64" });
-    }
-
-    const buffer = Buffer.from(b64, "base64");
-
-    // 1) Subimos el ORIGINAL a Cloudinary vía stream (evita ENOENT)
-    const up = await uploadBufferToCloudinary(buffer, "mora2/previews_src", mime);
+    const up = await cloudinary.uploader.upload(uploadSource, {
+      folder: "mora2/previews_src",
+      overwrite: true,
+    });
     const sourceUrl = up.secure_url;
-    if (!sourceUrl) throw new Error("Upload to Cloudinary failed");
 
-    // 2) Descargamos el original (URL) para pasarlo como archivo a OpenAI
+    // 2) Descargar original para pasarlo a OpenAI como archivo
     const ab = await fetch(sourceUrl).then((r) => r.arrayBuffer());
-    const file = await toFile(new Blob([ab], { type: mime }), "source" + (mime.endsWith("png") ? ".png" : ".jpg"));
+    const file = await toFile(new Blob([ab], { type: "image/jpeg" }), "source.jpg");
 
-    // 3) Generamos PREVIEW 512x512 con gpt-image-1
+    // 3) Llamar a OpenAI para el preview 512x512
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
 
     const result = await openai.images.edits({
@@ -86,16 +85,16 @@ export default async function handler(req, res) {
       response_format: "b64_json",
     });
 
-    const outB64 = result.data?.[0]?.b64_json;
-    if (!outB64) throw new Error("No image returned from OpenAI");
+    const b64 = result.data?.[0]?.b64_json;
+    if (!b64) throw new Error("No image returned from OpenAI");
 
     return res.status(200).json({
       ok: true,
-      previewBase64: `data:image/png;base64,${outB64}`,
+      previewBase64: `data:image/png;base64,${b64}`,
       sourceUrl,
     });
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ ok: false, error: e.message || "Server error" });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 }
