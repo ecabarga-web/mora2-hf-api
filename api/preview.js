@@ -1,4 +1,3 @@
-// api/preview.js
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { v2 as cloudinary } from "cloudinary";
@@ -11,7 +10,6 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// acepta hasta ~7 MB en el body (ajústalo si lo necesitas)
 export const config = { api: { bodyParser: { sizeLimit: "7mb" } } };
 
 const STYLE_PROMPTS = {
@@ -25,6 +23,14 @@ const STYLE_PROMPTS = {
     "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
 };
 
+// Si viene base64 pelado, le ponemos prefijo para Cloudinary
+function ensureDataUrl(b64) {
+  if (!b64) return "";
+  if (b64.startsWith("data:")) return b64;
+  // por defecto tratamos como jpeg
+  return `data:image/jpeg;base64,${b64}`;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
@@ -32,42 +38,36 @@ export default async function handler(req, res) {
 
   try {
     const { imageBase64, style = "urban" } = req.body || {};
-    if (!imageBase64 || typeof imageBase64 !== "string") {
+    if (!imageBase64) {
       return res.status(400).json({ ok: false, error: "imageBase64 required" });
     }
 
-    // Asegura data URL para Cloudinary (si te mandan puro base64 sin prefijo)
-    const dataUrl = imageBase64.startsWith("data:")
-      ? imageBase64
-      : `data:image/jpeg;base64,${imageBase64}`;
+    const dataUrl = ensureDataUrl(imageBase64);
 
-    // 1) Sube ORIGINAL a Cloudinary
+    // 1) Subir ORIGINAL a Cloudinary (acepta data URLs)
     const up = await cloudinary.uploader.upload(dataUrl, {
       folder: "mora2/previews_src",
       overwrite: true,
-      resource_type: "image",
     });
     const sourceUrl = up.secure_url;
 
-    // 2) Descarga original y conviértelo a File para el SDK
-    const ab = await fetch(sourceUrl).then((r) => r.arrayBuffer());
-    const file = await toFile(new Blob([ab], { type: "image/jpeg" }), "source.jpg");
+    // 2) Descargar el original como archivo para OpenAI
+    const file = await toFile(sourceUrl);
 
-    // 3) Genera PREVIEW 512x512 con gpt-image-1 (image-to-image)
+    // 3) Hacer EDIT con gpt-image-1 (SDK nuevo, sin response_format)
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
 
-    const result = await openai.images.generate({
+    const result = await openai.images.edits({
       model: "gpt-image-1",
+      image: file,          // archivo, no ruta ni data URL
       prompt,
       size: "512x512",
-      // NO uses response_format en el SDK nuevo
-      image: [file], // imagen de referencia (edición)
+      n: 1,
     });
 
-    const b64 = result?.data?.[0]?.b64_json;
-    if (!b64) {
-      throw new Error("No image returned from OpenAI");
-    }
+    // En el SDK nuevo, el base64 está en data[0].b64_json
+    const b64 = result.data?.[0]?.b64_json;
+    if (!b64) throw new Error("No image returned from OpenAI");
 
     return res.status(200).json({
       ok: true,
@@ -75,12 +75,7 @@ export default async function handler(req, res) {
       sourceUrl,
     });
   } catch (e) {
-    console.error("Preview error:", e);
-    // Si OpenAI devolvió error con payload, muéstralo como string
-    const msg =
-      e?.error?.message ||
-      e?.message ||
-      (typeof e === "string" ? e : "Unknown error");
-    return res.status(500).json({ ok: false, error: msg });
+    console.error(e);
+    return res.status(500).json({ ok: false, error: e.message || String(e) });
   }
 }
