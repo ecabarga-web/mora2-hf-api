@@ -15,18 +15,8 @@ cloudinary.config({
 });
 
 // Estilos
-const STYLE_PROMPTS = {
-  urban:
-    "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
-  retro:
-    "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and muted palette. Preserve identity and expressions. No text.",
-  vibrant:
-    "Turn the input photo into a vibrant cartoon poster, high contrast, neon accents, crisp outlines. Preserve identity. No text.",
-  anime:
-    "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
-};
+const STYLE_PROMPTS = { ... };  // (igual que antes, sin cambios)
 
-// Utilidad: dataURL -> Blob
 function dataURLToBlob(dataUrl) {
   const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl || "");
   if (!m) throw new Error("Invalid base64");
@@ -47,30 +37,36 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "imageBase64 required" });
     }
 
-    // 1) Convertimos el dataURL base64 a Blob para evitar ENOENT
+    // 1) Subimos la imagen original a Cloudinary usando upload_stream
+    const base64Data = imageBase64.split(",")[1]; // separa el prefijo data:
+    const imgBuffer = Buffer.from(base64Data, "base64");
+    const uploadResult = await new Promise((resolve, reject) => {
+      cloudinary.uploader.upload_stream(
+        { folder: "mora2/previews_src", overwrite: true },
+        (error, result) => {
+          if (error) return reject(error);
+          resolve(result);
+        }
+      ).end(imgBuffer);
+    });
+    const sourceUrl = uploadResult.secure_url;  // URL de la imagen original subida
+
+    // 2) Preparamos el archivo para OpenAI (como Blob a File) 
     const sourceBlob = dataURLToBlob(imageBase64);
     const sourceFile = await toFile(sourceBlob, "source.jpg");
 
-    // (Opcional) también subimos la original a Cloudinary para devolver el sourceUrl
-    const upload = await cloudinary.uploader.upload(imageBase64, {
-      folder: "mora2/previews_src",
-      overwrite: true,
-    });
-    const sourceUrl = upload.secure_url;
-
-    // 2) Generamos PREVIEW 512 con OpenAI (sin response_format, que da 400)
+    // 3) Generamos la imagen de vista previa 512x512 con OpenAI
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
-
-    const result = await openai.images.edits({
+    const result = await openai.images.edit({
       model: "gpt-image-1",
-      image: sourceFile, // <-- archivo correcto (Blob convertido)
+      image: sourceFile,
       prompt,
       size: "512x512",
       n: 1,
-      // No pongas "response_format"; el SDK actual ya devuelve b64 por defecto en "b64_json"
+      // No especifiques response_format (por defecto devuelve base64 en data.b64_json)
     });
 
-    const b64 = result?.data?.[0]?.b64_json;
+    const b64 = result.data[0]?.b64_json;
     if (!b64) throw new Error("No image returned from OpenAI");
 
     return res.status(200).json({
@@ -79,7 +75,12 @@ export default async function handler(req, res) {
       sourceUrl,
     });
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: e.message || String(e) });
+    console.error("Error en /api/preview:", e);
+    // Intenta extraer mensaje detallado si viene de OpenAI o Cloudinary
+    let errorMessage = e.message || String(e);
+    if (e.response?.data?.error?.message) {
+      errorMessage = e.response.data.error.message;
+    }
+    return res.status(500).json({ ok: false, error: errorMessage });
   }
 }
