@@ -13,7 +13,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// Estilos
+// ===== Estilos =====
 const STYLE_PROMPTS = {
   urban:
     "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
@@ -25,30 +25,41 @@ const STYLE_PROMPTS = {
     "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
 };
 
-// --- Utilidades ---
-function parseIncomingBase64(payload, fallbackMime = "image/jpeg") {
-  if (!payload || typeof payload !== "string") {
-    throw new Error("imageBase64 required");
-  }
+// ===== Utilidades =====
+const DATAURL_RE = /^data:([^;]+);base64,([A-Za-z0-9+/=]+)$/;
 
-  const trimmed = payload.trim().replace(/\s+/g, ""); // elimina espacios/saltos
+function parseIncomingBase64({ imageBase64, mime }) {
+  if (!imageBase64) throw new Error("imageBase64 required");
 
-  // 1) data URL -> extrae mime y base64
-  const m = /^data:([^;]+);base64,(.+)$/.exec(trimmed);
+  let detectedMime = mime;
+  let b64 = imageBase64;
+
+  // Caso A: data URL completo
+  const m = DATAURL_RE.exec(imageBase64);
   if (m) {
-    const mime = m[1];
-    const b64 = m[2];
-    return { mime, b64 };
+    detectedMime = m[1];
+    b64 = m[2];
+  } else {
+    // Caso B: base64 crudo -> mime obligatorio
+    if (!detectedMime) {
+      throw new Error(
+        "Invalid base64 (expected data:image/*;base64,* or provide 'mime' with image/jpeg|image/png|image/webp)"
+      );
+    }
   }
 
-  // 2) base64 “puro” -> usa mime proporcionado por el cliente o fallback
-  // Nota: aquí NO validamos caracteres del base64 para ser flexibles.
-  return { mime: fallbackMime, b64: trimmed };
-}
+  // Validación básica
+  if (!/^image\/(png|jpeg|webp)$/.test(detectedMime)) {
+    throw new Error("Unsupported mime. Use image/png, image/jpeg or image/webp");
+  }
 
-function b64ToBlob(b64, mime) {
-  const buf = Buffer.from(b64, "base64");
-  return new Blob([buf], { type: mime });
+  try {
+    const buf = Buffer.from(b64, "base64");
+    if (!buf.length) throw new Error("Empty buffer");
+    return { buffer: buf, mime: detectedMime };
+  } catch {
+    throw new Error("Invalid base64 payload");
+  }
 }
 
 function extFromMime(mime) {
@@ -57,59 +68,55 @@ function extFromMime(mime) {
   return "jpg"; // por defecto
 }
 
+// ===== Handler =====
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
-    const { imageBase64, style = "urban", mime } = req.body || {};
+    const { style = "urban" } = req.body || {};
+    const { buffer, mime } = parseIncomingBase64(req.body);
 
-    // Normaliza (acepta data URL o base64 puro + mime opcional)
-    const { mime: realMime, b64 } = parseIncomingBase64(imageBase64, mime || "image/jpeg");
-
-    // Sube original a Cloudinary (útil para trazabilidad)
-    await new Promise((resolve, reject) => {
+    // Sube la original a Cloudinary (opcional pero útil para trazabilidad)
+    const sourceUrl = await new Promise((resolve, reject) => {
       cloudinary.uploader
         .upload_stream(
           { folder: "mora2/previews_src", overwrite: true, resource_type: "image" },
-          (err, result) => (err ? reject(err) : resolve(result))
+          (err, result) => (err ? reject(err) : resolve(result.secure_url))
         )
-        .end(Buffer.from(b64, "base64"));
+        .end(buffer);
     });
 
-    // Prepara archivo para OpenAI
-    const blob = b64ToBlob(b64, realMime);
-    const filename = `source.${extFromMime(realMime)}`;
-    const file = await toFile(blob, filename);
+    // Prepara el archivo para OpenAI con contentType explícito
+    const filename = `source.${extFromMime(mime)}`;
+    const file = await toFile(buffer, filename, { contentType: mime });
 
-    // Prompt
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
 
-    // EDIT con tamaño válido (¡no 512!)
+    // gpt-image-1 acepta: 1024x1024 | 1024x1536 | 1536x1024 | auto
     const result = await openai.images.edit({
       model: "gpt-image-1",
       image: file,
       prompt,
-      size: "1024x1024", // válidos: '1024x1024' | '1024x1536' | '1536x1024' | 'auto'
+      size: "1024x1024",
       n: 1,
     });
 
-    const b64Out = result?.data?.[0]?.b64_json;
-    if (!b64Out) throw new Error("No image returned from OpenAI");
+    const b64 = result?.data?.[0]?.b64_json;
+    if (!b64) throw new Error("No image returned from OpenAI");
 
     return res.status(200).json({
       ok: true,
-      previewBase64: `data:image/png;base64,${b64Out}`,
+      previewBase64: `data:image/png;base64,${b64}`,
+      sourceUrl,
     });
   } catch (e) {
-    // Intenta mensaje legible
-    const friendly =
+    // Mensaje claro
+    const msg =
       e?.response?.data?.error?.message ||
-      e?.error?.message ||
       e?.message ||
-      String(e);
-    console.error("Error /api/preview:", e);
-    return res.status(400).json({ ok: false, error: friendly });
+      "Unexpected error";
+    return res.status(msg.includes("Invalid") ? 400 : 500).json({ ok: false, error: msg });
   }
 }
