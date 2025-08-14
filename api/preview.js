@@ -13,7 +13,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// prompts
+// Estilos
 const STYLE_PROMPTS = {
   urban:
     "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
@@ -25,44 +25,36 @@ const STYLE_PROMPTS = {
     "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
 };
 
-/**
- * Normaliza la imagen entrante:
- * - Acepta data URL: "data:image/png;base64,AAAA..."
- * - Acepta base64 "puro": "AAAA..." + mime provisto en "mime" (o default image/jpeg)
- * - Elimina saltos/espacios.
- */
-function normalizeIncomingImage({ imageBase64, mime }) {
-  if (!imageBase64 || typeof imageBase64 !== "string") {
+// --- Utilidades ---
+function parseIncomingBase64(payload, fallbackMime = "image/jpeg") {
+  if (!payload || typeof payload !== "string") {
     throw new Error("imageBase64 required");
   }
 
-  const s = imageBase64.trim().replace(/\s+/g, ""); // sin espacios/saltos
-  let outMime, b64, ext;
+  const trimmed = payload.trim().replace(/\s+/g, ""); // elimina espacios/saltos
 
-  // data URL?
-  const m = /^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/i.exec(s);
+  // 1) data URL -> extrae mime y base64
+  const m = /^data:([^;]+);base64,(.+)$/.exec(trimmed);
   if (m) {
-    outMime = m[1].toLowerCase();            // p.ej. image/jpeg
-    b64 = m[2];
-  } else {
-    // base64 "puro" sin prefijo; exige mime o asume image/jpeg
-    outMime = (mime || "image/jpeg").toLowerCase();
-    // validar mime soportado
-    if (!/^image\/(?:jpeg|jpg|png|webp)$/.test(outMime)) {
-      throw new Error(`Unsupported mime: ${outMime}`);
-    }
-    // si por error vino con "data:image..." lo limpiamos
-    const idx = s.indexOf("base64,");
-    b64 = idx >= 0 ? s.slice(idx + 7) : s;
-    // debe ser base64
-    if (!/^[A-Za-z0-9+/=]+$/.test(b64)) {
-      throw new Error("Invalid base64 payload");
-    }
+    const mime = m[1];
+    const b64 = m[2];
+    return { mime, b64 };
   }
 
-  ext = outMime.split("/")[1];
+  // 2) base64 “puro” -> usa mime proporcionado por el cliente o fallback
+  // Nota: aquí NO validamos caracteres del base64 para ser flexibles.
+  return { mime: fallbackMime, b64: trimmed };
+}
+
+function b64ToBlob(b64, mime) {
   const buf = Buffer.from(b64, "base64");
-  return { buf, mime: outMime, ext };
+  return new Blob([buf], { type: mime });
+}
+
+function extFromMime(mime) {
+  if (mime === "image/png") return "png";
+  if (mime === "image/webp") return "webp";
+  return "jpg"; // por defecto
 }
 
 export default async function handler(req, res) {
@@ -72,38 +64,34 @@ export default async function handler(req, res) {
 
   try {
     const { imageBase64, style = "urban", mime } = req.body || {};
-    const { buf, mime: effectiveMime, ext } = normalizeIncomingImage({
-      imageBase64,
-      mime,
-    });
 
-    // 1) Subir original a Cloudinary (opcional, nos da URL)
-    const sourceUrl = await new Promise((resolve, reject) => {
+    // Normaliza (acepta data URL o base64 puro + mime opcional)
+    const { mime: realMime, b64 } = parseIncomingBase64(imageBase64, mime || "image/jpeg");
+
+    // Sube original a Cloudinary (útil para trazabilidad)
+    await new Promise((resolve, reject) => {
       cloudinary.uploader
         .upload_stream(
-          {
-            folder: "mora2/previews_src",
-            overwrite: true,
-            resource_type: "image",
-          },
-          (error, result) => {
-            if (error) return reject(error);
-            resolve(result.secure_url);
-          }
+          { folder: "mora2/previews_src", overwrite: true, resource_type: "image" },
+          (err, result) => (err ? reject(err) : resolve(result))
         )
-        .end(buf);
+        .end(Buffer.from(b64, "base64"));
     });
 
-    // 2) Crear archivo para OpenAI con mime correcto
-    const sourceFile = await toFile(buf, `source.${ext}`, { type: effectiveMime });
+    // Prepara archivo para OpenAI
+    const blob = b64ToBlob(b64, realMime);
+    const filename = `source.${extFromMime(realMime)}`;
+    const file = await toFile(blob, filename);
 
-    // 3) Generar preview 512x512 con OpenAI
+    // Prompt
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
+
+    // EDIT con tamaño válido (¡no 512!)
     const result = await openai.images.edit({
       model: "gpt-image-1",
-      image: sourceFile,
+      image: file,
       prompt,
-      size: "512x512",
+      size: "1024x1024", // válidos: '1024x1024' | '1024x1536' | '1536x1024' | 'auto'
       n: 1,
     });
 
@@ -113,11 +101,15 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       previewBase64: `data:image/png;base64,${b64Out}`,
-      sourceUrl,
     });
   } catch (e) {
+    // Intenta mensaje legible
+    const friendly =
+      e?.response?.data?.error?.message ||
+      e?.error?.message ||
+      e?.message ||
+      String(e);
     console.error("Error /api/preview:", e);
-    const msg = e?.message || String(e);
-    return res.status(400).json({ ok: false, error: msg });
+    return res.status(400).json({ ok: false, error: friendly });
   }
 }
