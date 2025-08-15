@@ -44,7 +44,7 @@ export default async function handler(req, res) {
       model: "gpt-image-1",
       image: file,
       prompt,
-      size: "2048x2048",
+      size: "1536x1024",
       n: 1,
       response_format: "b64_json"
     });
