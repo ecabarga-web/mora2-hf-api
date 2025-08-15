@@ -10,7 +10,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-export const config = { api: { bodyParser: { sizeLimit: "7mb" } } };
+export const config = { api: { bodyParser: { sizeLimit: "15mb" } } };
 
 const STYLE_PROMPTS = {
   urban: "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
@@ -25,17 +25,21 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { sourceUrl, style = "urban" } = req.body || {};
-    if (!sourceUrl) {
-      return res.status(400).json({ ok: false, error: "sourceUrl required" });
+    const { imageBase64, style = "urban" } = req.body || {};
+    if (!imageBase64) {
+      return res.status(400).json({ ok: false, error: "imageBase64 required" });
     }
 
-    const ab = await fetch(sourceUrl).then(r => r.arrayBuffer());
-    const file = await toFile(new Blob([ab], { type: "image/jpeg" }), "source.jpg");
+    // Quitar prefijo data:image/...;base64, si existe
+    const cleanB64 = imageBase64.replace(/^data:image\/\w+;base64,/, "");
+    const imgBuffer = Buffer.from(cleanB64, "base64");
 
-    // 1) HD 2048x2048
+    // Convertir a archivo para OpenAI
+    const file = await toFile(new Blob([imgBuffer], { type: "image/png" }), "source.png");
+
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
 
+    // Generar imagen HD
     const result = await openai.images.edits({
       model: "gpt-image-1",
       image: file,
@@ -48,7 +52,7 @@ export default async function handler(req, res) {
     const hdB64 = result.data?.[0]?.b64_json;
     if (!hdB64) throw new Error("No HD from OpenAI");
 
-    // 2) Subir a Cloudinary
+    // Subir a Cloudinary
     const uploadRes = await cloudinary.uploader.upload(
       `data:image/png;base64,${hdB64}`,
       {
