@@ -2,12 +2,6 @@ import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { v2 as cloudinary } from "cloudinary";
 
-export const config = {
-  runtime: 'nodejs20.x',
-  regions: ['iad1'],
-  maxDuration: 30
-};
-
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 cloudinary.config({
@@ -16,83 +10,48 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization"
-};
-
-const STYLE_PROMPTS = {
-  urban:  "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact. No text.",
-  comic:  "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and muted palette. Keep identity intact. No text.",
-  cartoon:"Turn the input photo into a vibrant cartoon poster with high contrast and crisp outlines. Keep identity intact. No text.",
-  anime:  "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Keep identity intact. No text."
-};
-
-function inferExt(mime) {
-  if (mime?.includes("png"))  return "png";
-  if (mime?.includes("jpeg") || mime?.includes("jpg")) return "jpg";
-  if (mime?.includes("webp")) return "webp";
-  return "png";
-}
-
-function parseDataUrl(dataUrl) {
-  const m = /^data:(.+?);base64,(.+)$/.exec(dataUrl || "");
-  if (!m) return null;
-  const mime = m[1];
-  const b64  = m[2];
-  const buf  = Buffer.from(b64, "base64");
-  const blob = new Blob([buf], { type: mime });
-  const fileName = `source.${inferExt(mime)}`;
-  return { blob, fileName, mime };
-}
-
-async function fetchUrlAsBlob(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`fetch imageUrl failed: ${r.status}`);
-  const ab  = await r.arrayBuffer();
-  let mime  = r.headers.get("content-type") || "";
-  if (!/image\/(png|jpeg|webp)/.test(mime)) {
-    if (url.endsWith(".png")) mime = "image/png";
-    else if (/\.(jpe?g)$/i.test(url)) mime = "image/jpeg";
-    else if (url.endsWith(".webp")) mime = "image/webp";
-    else mime = "image/png";
-  }
-  const blob = new Blob([ab], { type: mime });
-  const fileName = `source.${inferExt(mime)}`;
-  return { blob, fileName, mime };
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", process.env.ALLOWED_ORIGIN || "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
 export default async function handler(req, res) {
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, CORS).end();
-    return;
-  }
-  if (req.method !== "POST") {
-    res.writeHead(405, CORS).end();
-    return;
-  }
+  setCors(res);
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
 
   try {
-    const { imageBase64, sourceUrl, imageUrl, style = "urban" } = req.body || {};
-
-    let blobInfo = null;
-    if (sourceUrl) {
-      blobInfo = await fetchUrlAsBlob(sourceUrl);
-    } else if (imageUrl) {
-      blobInfo = await fetchUrlAsBlob(imageUrl);
-    } else if (imageBase64) {
-      blobInfo = parseDataUrl(imageBase64);
-      if (!blobInfo) {
-        res.writeHead(400, CORS);
-        return res.end(JSON.stringify({ ok: false, error: "Invalid base64 (expected data:image/*;base64,...)" }));
-      }
-    } else {
-      res.writeHead(400, CORS);
-      return res.end(JSON.stringify({ ok: false, error: "Provide one of: sourceUrl | imageUrl | imageBase64" }));
+    const { imageBase64, sourceUrl, style = "urban" } = req.body || {};
+    if (!imageBase64 && !sourceUrl) {
+      return res.status(400).json({ ok: false, error: "imageBase64 (data URL) o sourceUrl requeridos" });
     }
 
-    const file = await toFile(blobInfo.blob, blobInfo.fileName);
+    let file;
+
+    if (imageBase64) {
+      const match = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/i.exec(imageBase64);
+      if (!match) return res.status(400).json({ ok: false, error: "Invalid data URL" });
+      const mime = match[1];
+      const buf = Buffer.from(match[2], "base64");
+      file = await toFile(new Blob([buf], { type: mime }), `source.${mime.split("/")[1]}`);
+    } else {
+      const r = await fetch(sourceUrl);
+      if (!r.ok) throw new Error(`No se pudo descargar sourceUrl (${r.status})`);
+      const mime = r.headers.get("content-type") || "image/png";
+      if (!/image\/(png|jpeg|webp)/i.test(mime)) {
+        return res.status(400).json({ ok: false, error: `Mimetype no soportado en sourceUrl (${mime})` });
+      }
+      const ab = await r.arrayBuffer();
+      file = await toFile(new Blob([ab], { type: mime }), `source.${mime.split("/")[1]}`);
+    }
+
+    const STYLE_PROMPTS = {
+      urban:  "Bold urban-street cartoon illustration, clean inking, saturated colors, flat background. Keep identity. No text.",
+      comic:  "Retro comic-book illustration, vintage halftones, inked outlines, muted palette. Keep identity. No text.",
+      cartoon:"Vibrant cartoon poster, high contrast, neon accents, crisp outlines. Keep identity. No text.",
+      anime:  "Anime character, big expressive eyes, soft cel shading, clean lineart. Keep identity. No text."
+    };
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
 
     const result = await openai.images.edits({
@@ -104,19 +63,18 @@ export default async function handler(req, res) {
       response_format: "b64_json"
     });
 
-    const b64 = result.data?.[0]?.b64_json;
-    if (!b64) throw new Error("No HD from OpenAI");
+    const hdB64 = result.data?.[0]?.b64_json;
+    if (!hdB64) throw new Error("OpenAI no devolvió imagen HD");
 
-    const up = await cloudinary.uploader.upload(
-      `data:image/png;base64,${b64}`,
-      { folder: "mora2/generated_hd", resource_type: "image", overwrite: true }
+    // Subir a Cloudinary para servir un URL
+    const upload = await cloudinary.uploader.upload(
+      `data:image/png;base64,${hdB64}`,
+      { folder: "mora2/generated_hd", overwrite: true, resource_type: "image" }
     );
 
-    res.writeHead(200, { "Content-Type": "application/json", ...CORS });
-    res.end(JSON.stringify({ ok: true, hdUrl: up.secure_url }));
-  } catch (e) {
-    console.error("Error /api/generate-hd:", e);
-    res.writeHead(500, { "Content-Type": "application/json", ...CORS });
-    res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
+    return res.status(200).json({ ok: true, hdUrl: upload.secure_url });
+  } catch (err) {
+    console.error("Error /api/generate-hd:", err);
+    return res.status(500).json({ ok: false, error: err.message || String(err) });
   }
 }
