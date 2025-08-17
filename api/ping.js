@@ -1,10 +1,8 @@
-export const config = {
-  runtime: 'nodejs20.x',
-  regions: ['iad1'],
-  maxDuration: 10
-};
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(204).end();
 
-export default function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.status(200).json({ ok: true, time: new Date().toISOString() });
+  return res.status(200).json({ ok: true, time: new Date().toISOString() });
 }
