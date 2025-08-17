@@ -1,11 +1,9 @@
 {
   "name": "mora2-hf-api",
-  "version": "1.0.0",
-  "type": "module",
   "private": true,
-  "engines": { "node": "20.x" },
+  "type": "module",
   "dependencies": {
-    "openai": "^4.59.0",
+    "openai": "^4.55.0",
     "cloudinary": "^1.41.3"
   }
 }
