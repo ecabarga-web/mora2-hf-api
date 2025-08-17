@@ -1,12 +1,15 @@
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 
-export const config = { api: { bodyParser: { sizeLimit: "7mb" } } };
+export const config = {
+  runtime: 'nodejs20.x',
+  regions: ['iad1'],
+  maxDuration: 30
+};
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// --- CORS helpers ---
-const CORS_HEADERS = {
+const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization"
@@ -20,9 +23,9 @@ const STYLE_PROMPTS = {
 };
 
 function inferExt(mime) {
-  if (mime.includes("png"))  return "png";
-  if (mime.includes("jpeg") || mime.includes("jpg")) return "jpg";
-  if (mime.includes("webp")) return "webp";
+  if (mime?.includes("png"))  return "png";
+  if (mime?.includes("jpeg") || mime?.includes("jpg")) return "jpg";
+  if (mime?.includes("webp")) return "webp";
   return "png";
 }
 
@@ -33,8 +36,7 @@ function parseDataUrl(dataUrl) {
   const b64  = m[2];
   const buf  = Buffer.from(b64, "base64");
   const blob = new Blob([buf], { type: mime });
-  const ext  = inferExt(mime);
-  const fileName = `source.${ext}`;
+  const fileName = `source.${inferExt(mime)}`;
   return { blob, fileName, mime };
 }
 
@@ -44,25 +46,23 @@ async function fetchUrlAsBlob(url) {
   const ab  = await r.arrayBuffer();
   let mime  = r.headers.get("content-type") || "";
   if (!/image\/(png|jpeg|webp)/.test(mime)) {
-    // intenta inferir por extensión si el header viene vacío
     if (url.endsWith(".png")) mime = "image/png";
     else if (/\.(jpe?g)$/i.test(url)) mime = "image/jpeg";
     else if (url.endsWith(".webp")) mime = "image/webp";
     else mime = "image/png";
   }
   const blob = new Blob([ab], { type: mime });
-  const ext  = inferExt(mime);
-  return { blob, fileName: `source.${ext}`, mime };
+  const fileName = `source.${inferExt(mime)}`;
+  return { blob, fileName, mime };
 }
 
 export default async function handler(req, res) {
   if (req.method === "OPTIONS") {
-    res.writeHead(204, CORS_HEADERS).end();
+    res.writeHead(204, CORS).end();
     return;
   }
-
   if (req.method !== "POST") {
-    res.writeHead(405, CORS_HEADERS).end();
+    res.writeHead(405, CORS).end();
     return;
   }
 
@@ -73,23 +73,19 @@ export default async function handler(req, res) {
     if (imageBase64) {
       blobInfo = parseDataUrl(imageBase64);
       if (!blobInfo) {
-        res.writeHead(400, CORS_HEADERS);
+        res.writeHead(400, CORS);
         return res.end(JSON.stringify({ ok: false, error: "Invalid base64 (expected data:image/*;base64,...)" }));
       }
     } else if (imageUrl) {
       blobInfo = await fetchUrlAsBlob(imageUrl);
     } else {
-      res.writeHead(400, CORS_HEADERS);
+      res.writeHead(400, CORS);
       return res.end(JSON.stringify({ ok: false, error: "imageBase64 or imageUrl required" }));
     }
 
-    const { blob, fileName, mime } = blobInfo;
-    // Muy importante: pasar el MIME correcto al Blob, así evitamos 'application/octet-stream'
-    const file = await toFile(blob, fileName);
-
+    const file = await toFile(blobInfo.blob, blobInfo.fileName);
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
 
-    // Preview 1024
     const result = await openai.images.edits({
       model: "gpt-image-1",
       image: file,
@@ -103,11 +99,11 @@ export default async function handler(req, res) {
     if (!b64) throw new Error("No preview from OpenAI");
     const previewBase64 = `data:image/png;base64,${b64}`;
 
-    res.writeHead(200, { "Content-Type": "application/json", ...CORS_HEADERS });
+    res.writeHead(200, { "Content-Type": "application/json", ...CORS });
     res.end(JSON.stringify({ ok: true, previewBase64 }));
   } catch (e) {
     console.error("Error /api/preview:", e);
-    res.writeHead(500, { "Content-Type": "application/json", ...CORS_HEADERS });
+    res.writeHead(500, { "Content-Type": "application/json", ...CORS });
     res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
   }
 }
