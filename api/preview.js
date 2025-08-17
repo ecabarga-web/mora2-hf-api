@@ -1,116 +1,136 @@
-// ---- CORS SHIM (pegar al inicio del archivo) ----
-const ALLOWED_ORIGINS = [
-  'https://mora2.com',
-  'http://localhost:3000',
-  'http://localhost:5173'
-];
-
-function pickOrigin(req) {
-  const o = req.headers?.origin || '';
-  return ALLOWED_ORIGINS.includes(o) ? o : ALLOWED_ORIGINS[0];
-}
-
-function setCors(res, origin) {
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.setHeader('Access-Control-Max-Age', '86400');
-}
-
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
-import { v2 as cloudinary } from "cloudinary";
 
-export const config = { api: { bodyParser: { sizeLimit: "10mb" } } };
+export const config = { api: { bodyParser: { sizeLimit: "7mb" } } };
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key:    process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
-
-// Estilos
 const STYLE_PROMPTS = {
-  urban:   "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
-  comic:   "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and muted palette. Preserve identity and expressions. No text.",
-  cartoon: "Turn the input photo into a vibrant cartoon poster, high contrast, neon accents, crisp outlines. Preserve identity. No text.",
-  anime:   "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text."
+  urban:
+    "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
+  comic:
+    "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and muted palette. Preserve identity and expressions. No text.",
+  cartoon:
+    "Turn the input photo into a vibrant cartoon poster with high contrast, crisp outlines, and neon accents. Preserve identity. No text.",
+  anime:
+    "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
 };
 
-// Helpers
-function parseDataUrl(dataUrl) {
-  const m = /^data:(image\/(png|jpeg|jpg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl || "");
-  if (!m) throw new Error("Invalid base64 (expected data:image/*;base64,...)");
-  const mime = m[1];
-  const ext  = m[2] === 'jpg' ? 'jpeg' : m[2];
-  const buf  = Buffer.from(m[3], "base64");
-  return { mime, ext, buf };
+const EXT_FROM_MIME = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+};
+
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "https://mora2.com");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
 }
 
-function uploadToCloudinaryBuffer(buf, folder, mime = "image/png") {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { folder, resource_type: "image", overwrite: true },
-      (err, result) => err ? reject(err) : resolve(result)
-    );
-    stream.end(buf);
-  });
+function parseDataUrl(dataUrl) {
+  // data:image/png;base64,AAAA...
+  const m = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/.exec(
+    dataUrl || ""
+  );
+  if (!m) throw new Error("Invalid base64 (expected data:image/*;base64,...)");
+  return { mime: m[1], base64: m[2] };
+}
+
+async function buildImageFile({ imageBase64, imageUrl }) {
+  // 1) Data URL
+  if (imageBase64) {
+    const { mime, base64 } = parseDataUrl(imageBase64);
+    if (!EXT_FROM_MIME[mime]) {
+      throw new Error(
+        `Unsupported image mime '${mime}'. Use PNG/JPEG/WEBP data URL.`
+      );
+    }
+    const buf = Buffer.from(base64, "base64");
+    const filename = `source.${EXT_FROM_MIME[mime]}`;
+    return {
+      file: await toFile(buf, filename, { contentType: mime }),
+      mime,
+      filename,
+      bytes: buf.length,
+    };
+  }
+
+  // 2) HTTP(S) URL
+  if (imageUrl) {
+    const r = await fetch(imageUrl);
+    if (!r.ok) throw new Error(`Cannot fetch imageUrl (HTTP ${r.status})`);
+    const mime = r.headers.get("content-type") || "image/png";
+    if (!EXT_FROM_MIME[mime]) {
+      throw new Error(
+        `Unsupported remote mimetype '${mime}'. Use PNG/JPEG/WEBP.`
+      );
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    const filename = `source.${EXT_FROM_MIME[mime]}`;
+    return {
+      file: await toFile(buf, filename, { contentType: mime }),
+      mime,
+      filename,
+      bytes: buf.length,
+    };
+  }
+
+  throw new Error("imageBase64 (data URL) or imageUrl required");
 }
 
 export default async function handler(req, res) {
-  const origin = pickOrigin(req);
-  setCors(res, origin);
+  setCors(res);
 
-  // Preflight
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
   }
-
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
-    const { imageBase64, style = "urban" } = req.body || {};
-    if (!imageBase64) {
-      return res.status(400).json({ ok: false, error: "imageBase64 required (data URL)" });
-    }
+    const t0 = Date.now();
+    const { imageBase64, imageUrl, style = "urban" } = req.body || {};
 
-    // 1) Parsear data URL y subir ORIGINAL a Cloudinary (sirve para HD)
-    const { mime, ext, buf } = parseDataUrl(imageBase64);
-    const up = await uploadToCloudinaryBuffer(buf, "mora2/previews_src", mime);
-    const sourceUrl = up.secure_url;
-
-    // 2) Preparar archivo para OpenAI (con mimetype correcto)
-    const file = new File([buf], source.${ext}, { type: mime });
-
-    // 3) Generar PREVIEW con gpt-image-1 (usa tamaños válidos: 1024/1536 o auto)
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
+    const { file, mime, filename, bytes } = await buildImageFile({
+      imageBase64,
+      imageUrl,
+    });
 
-    // Nota: en el SDK v4 el método es `images.edit` (singular)
-    const result = await openai.images.edit({
+    // Preview: 512x512
+    const result = await openai.images.edits({
       model: "gpt-image-1",
       image: file,
       prompt,
-      size: "1024x1024", // evita 512, no está soportado
-      n: 1
+      size: "512x512",
+      n: 1,
+      response_format: "b64_json",
     });
 
     const b64 = result?.data?.[0]?.b64_json;
-    if (!b64) throw new Error("No image returned from OpenAI");
+    if (!b64) throw new Error("No preview image returned by OpenAI");
+
+    const previewBase64 = `data:image/png;base64,${b64}`;
 
     return res.status(200).json({
       ok: true,
-      previewBase64: `data:image/png;base64,${b64}`,
-      sourceUrl
+      previewBase64,
+      // puedes devolver también algún dato útil de debug:
+      debug: {
+        mimeSent: mime,
+        filename,
+        bytes,
+        tookMs: Date.now() - t0,
+      },
     });
   } catch (e) {
     console.error("Error /api/preview:", e);
-    // Si viene de OpenAI, suele tener e.status y e.error
-    const msg = e?.message || (e?.error?.message) || String(e);
-    return res.status(500).json({ ok: false, error: msg });
+    // Intenta devolver texto crudo si es error OpenAI
+    return res
+      .status(400)
+      .json({ ok: false, error: e?.message || "Preview failed" });
   }
 }
