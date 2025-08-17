@@ -89,8 +89,7 @@ export default async function handler(req, res) {
     }
 
     // Archivo para OpenAI
-    const blob = new Blob([buf], { type: mime });
-    const file = await toFile(blob, `source.${ext}`);
+    const file = new File([buf], source.${ext}, { type: mime });
 
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
 
