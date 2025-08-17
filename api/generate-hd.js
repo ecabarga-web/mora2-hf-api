@@ -2,7 +2,11 @@ import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { v2 as cloudinary } from "cloudinary";
 
-export const config = { api: { bodyParser: { sizeLimit: "7mb" } } };
+export const config = {
+  runtime: 'nodejs20.x',
+  regions: ['iad1'],
+  maxDuration: 30
+};
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -12,8 +16,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-// --- CORS ---
-const CORS_HEADERS = {
+const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization"
@@ -27,9 +30,9 @@ const STYLE_PROMPTS = {
 };
 
 function inferExt(mime) {
-  if (mime.includes("png"))  return "png";
-  if (mime.includes("jpeg") || mime.includes("jpg")) return "jpg";
-  if (mime.includes("webp")) return "webp";
+  if (mime?.includes("png"))  return "png";
+  if (mime?.includes("jpeg") || mime?.includes("jpg")) return "jpg";
+  if (mime?.includes("webp")) return "webp";
   return "png";
 }
 
@@ -40,8 +43,7 @@ function parseDataUrl(dataUrl) {
   const b64  = m[2];
   const buf  = Buffer.from(b64, "base64");
   const blob = new Blob([buf], { type: mime });
-  const ext  = inferExt(mime);
-  const fileName = `source.${ext}`;
+  const fileName = `source.${inferExt(mime)}`;
   return { blob, fileName, mime };
 }
 
@@ -57,18 +59,17 @@ async function fetchUrlAsBlob(url) {
     else mime = "image/png";
   }
   const blob = new Blob([ab], { type: mime });
-  const ext  = inferExt(mime);
-  return { blob, fileName: `source.${ext}`, mime };
+  const fileName = `source.${inferExt(mime)}`;
+  return { blob, fileName, mime };
 }
 
 export default async function handler(req, res) {
   if (req.method === "OPTIONS") {
-    res.writeHead(204, CORS_HEADERS).end();
+    res.writeHead(204, CORS).end();
     return;
   }
-
   if (req.method !== "POST") {
-    res.writeHead(405, CORS_HEADERS).end();
+    res.writeHead(405, CORS).end();
     return;
   }
 
@@ -83,20 +84,17 @@ export default async function handler(req, res) {
     } else if (imageBase64) {
       blobInfo = parseDataUrl(imageBase64);
       if (!blobInfo) {
-        res.writeHead(400, CORS_HEADERS);
+        res.writeHead(400, CORS);
         return res.end(JSON.stringify({ ok: false, error: "Invalid base64 (expected data:image/*;base64,...)" }));
       }
     } else {
-      res.writeHead(400, CORS_HEADERS);
+      res.writeHead(400, CORS);
       return res.end(JSON.stringify({ ok: false, error: "Provide one of: sourceUrl | imageUrl | imageBase64" }));
     }
 
-    const { blob, fileName } = blobInfo;
-    const file = await toFile(blob, fileName);
-
+    const file = await toFile(blobInfo.blob, blobInfo.fileName);
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
 
-    // HD 2048
     const result = await openai.images.edits({
       model: "gpt-image-1",
       image: file,
@@ -109,17 +107,16 @@ export default async function handler(req, res) {
     const b64 = result.data?.[0]?.b64_json;
     if (!b64) throw new Error("No HD from OpenAI");
 
-    // Subimos a Cloudinary
     const up = await cloudinary.uploader.upload(
       `data:image/png;base64,${b64}`,
       { folder: "mora2/generated_hd", resource_type: "image", overwrite: true }
     );
 
-    res.writeHead(200, { "Content-Type": "application/json", ...CORS_HEADERS });
+    res.writeHead(200, { "Content-Type": "application/json", ...CORS });
     res.end(JSON.stringify({ ok: true, hdUrl: up.secure_url }));
   } catch (e) {
     console.error("Error /api/generate-hd:", e);
-    res.writeHead(500, { "Content-Type": "application/json", ...CORS_HEADERS });
+    res.writeHead(500, { "Content-Type": "application/json", ...CORS });
     res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
   }
 }
