@@ -1,12 +1,14 @@
 {
-  "version": 2,
   "functions": {
     "api/*.js": {
       "runtime": "nodejs20.x",
-      "memory": 1024,
-      "maxDuration": 30
+      "maxDuration": 30,
+      "memory": 1024
     }
   },
+  "routes": [
+    { "src": "/api/(.*)", "methods": ["GET","POST","OPTIONS"], "dest": "/api/$1" }
+  ],
   "headers": [
     {
       "source": "/api/(.*)",
@@ -14,8 +16,8 @@
         { "key": "Access-Control-Allow-Origin", "value": "https://mora2.com" },
         { "key": "Access-Control-Allow-Methods", "value": "GET,POST,OPTIONS" },
         { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" },
-        { "key": "Access-Control-Max-Age", "value": "86400" },
-        { "key": "Vary", "value": "Origin" }
+        { "key": "Access-Control-Allow-Credentials", "value": "true" },
+        { "key": "Cache-Control", "value": "no-store" }
       ]
     }
   ]
