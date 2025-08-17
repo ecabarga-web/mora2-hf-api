@@ -85,8 +85,7 @@ export default async function handler(req, res) {
     const sourceUrl = up.secure_url;
 
     // 2) Preparar archivo para OpenAI (con mimetype correcto)
-    const blob = new Blob([buf], { type: mime });
-    const file = await toFile(blob, `source.${ext}`);
+    const file = new File([buf], source.${ext}, { type: mime });
 
     // 3) Generar PREVIEW con gpt-image-1 (usa tamaños válidos: 1024/1536 o auto)
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
