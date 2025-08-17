@@ -70,13 +70,13 @@ async function openaiImageEdit({ blob, prompt, size }) {
 
 const STYLE_PROMPTS = {
   urban:
-    "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
+    "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and transparent background. Keep identity and face intact, keep clothing silhouette similar. No text.",
   comic:
-    "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and muted palette. Preserve identity and expressions. No text.",
+    "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and muted palette. Preserve identity and expressions. Transparent Background. No text.",
   cartoon:
-    "Turn the input photo into a vibrant cartoon poster, high contrast, neon accents, crisp outlines. Preserve identity. No text.",
+    "Turn the input photo into a vibrant cartoon poster, high contrast, neon accents, crisp outlines. Transparent Background.Preserve identity. No text.",
   anime:
-    "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
+    "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Transparent Background.Preserve identity. No text.",
 };
 
 async function uploadCloudinary(dataUrl) {
