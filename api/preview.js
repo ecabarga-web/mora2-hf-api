@@ -5,132 +5,109 @@ export const config = { api: { bodyParser: { sizeLimit: "7mb" } } };
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+// --- CORS helpers ---
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization"
+};
+
 const STYLE_PROMPTS = {
-  urban:
-    "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
-  comic:
-    "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and muted palette. Preserve identity and expressions. No text.",
-  cartoon:
-    "Turn the input photo into a vibrant cartoon poster with high contrast, crisp outlines, and neon accents. Preserve identity. No text.",
-  anime:
-    "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
+  urban:  "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact. No text.",
+  comic:  "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and muted palette. Keep identity intact. No text.",
+  cartoon:"Turn the input photo into a vibrant cartoon poster with high contrast and crisp outlines. Keep identity intact. No text.",
+  anime:  "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Keep identity intact. No text."
 };
 
-const EXT_FROM_MIME = {
-  "image/png": "png",
-  "image/jpeg": "jpg",
-  "image/webp": "webp",
-};
-
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "https://mora2.com");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Allow-Credentials", "true");
+function inferExt(mime) {
+  if (mime.includes("png"))  return "png";
+  if (mime.includes("jpeg") || mime.includes("jpg")) return "jpg";
+  if (mime.includes("webp")) return "webp";
+  return "png";
 }
 
 function parseDataUrl(dataUrl) {
-  // data:image/png;base64,AAAA...
-  const m = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/.exec(
-    dataUrl || ""
-  );
-  if (!m) throw new Error("Invalid base64 (expected data:image/*;base64,...)");
-  return { mime: m[1], base64: m[2] };
+  const m = /^data:(.+?);base64,(.+)$/.exec(dataUrl || "");
+  if (!m) return null;
+  const mime = m[1];
+  const b64  = m[2];
+  const buf  = Buffer.from(b64, "base64");
+  const blob = new Blob([buf], { type: mime });
+  const ext  = inferExt(mime);
+  const fileName = `source.${ext}`;
+  return { blob, fileName, mime };
 }
 
-async function buildImageFile({ imageBase64, imageUrl }) {
-  // 1) Data URL
-  if (imageBase64) {
-    const { mime, base64 } = parseDataUrl(imageBase64);
-    if (!EXT_FROM_MIME[mime]) {
-      throw new Error(
-        `Unsupported image mime '${mime}'. Use PNG/JPEG/WEBP data URL.`
-      );
-    }
-    const buf = Buffer.from(base64, "base64");
-    const filename = `source.${EXT_FROM_MIME[mime]}`;
-    return {
-      file: await toFile(buf, filename, { contentType: mime }),
-      mime,
-      filename,
-      bytes: buf.length,
-    };
+async function fetchUrlAsBlob(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`fetch imageUrl failed: ${r.status}`);
+  const ab  = await r.arrayBuffer();
+  let mime  = r.headers.get("content-type") || "";
+  if (!/image\/(png|jpeg|webp)/.test(mime)) {
+    // intenta inferir por extensión si el header viene vacío
+    if (url.endsWith(".png")) mime = "image/png";
+    else if (/\.(jpe?g)$/i.test(url)) mime = "image/jpeg";
+    else if (url.endsWith(".webp")) mime = "image/webp";
+    else mime = "image/png";
   }
-
-  // 2) HTTP(S) URL
-  if (imageUrl) {
-    const r = await fetch(imageUrl);
-    if (!r.ok) throw new Error(`Cannot fetch imageUrl (HTTP ${r.status})`);
-    const mime = r.headers.get("content-type") || "image/png";
-    if (!EXT_FROM_MIME[mime]) {
-      throw new Error(
-        `Unsupported remote mimetype '${mime}'. Use PNG/JPEG/WEBP.`
-      );
-    }
-    const buf = Buffer.from(await r.arrayBuffer());
-    const filename = `source.${EXT_FROM_MIME[mime]}`;
-    return {
-      file: await toFile(buf, filename, { contentType: mime }),
-      mime,
-      filename,
-      bytes: buf.length,
-    };
-  }
-
-  throw new Error("imageBase64 (data URL) or imageUrl required");
+  const blob = new Blob([ab], { type: mime });
+  const ext  = inferExt(mime);
+  return { blob, fileName: `source.${ext}`, mime };
 }
 
 export default async function handler(req, res) {
-  setCors(res);
-
   if (req.method === "OPTIONS") {
-    return res.status(204).end();
+    res.writeHead(204, CORS_HEADERS).end();
+    return;
   }
+
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    res.writeHead(405, CORS_HEADERS).end();
+    return;
   }
 
   try {
-    const t0 = Date.now();
     const { imageBase64, imageUrl, style = "urban" } = req.body || {};
 
-    const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
-    const { file, mime, filename, bytes } = await buildImageFile({
-      imageBase64,
-      imageUrl,
-    });
+    let blobInfo = null;
+    if (imageBase64) {
+      blobInfo = parseDataUrl(imageBase64);
+      if (!blobInfo) {
+        res.writeHead(400, CORS_HEADERS);
+        return res.end(JSON.stringify({ ok: false, error: "Invalid base64 (expected data:image/*;base64,...)" }));
+      }
+    } else if (imageUrl) {
+      blobInfo = await fetchUrlAsBlob(imageUrl);
+    } else {
+      res.writeHead(400, CORS_HEADERS);
+      return res.end(JSON.stringify({ ok: false, error: "imageBase64 or imageUrl required" }));
+    }
 
-    // Preview: 512x512
+    const { blob, fileName, mime } = blobInfo;
+    // Muy importante: pasar el MIME correcto al Blob, así evitamos 'application/octet-stream'
+    const file = await toFile(blob, fileName);
+
+    const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
+
+    // Preview 1024
     const result = await openai.images.edits({
       model: "gpt-image-1",
       image: file,
       prompt,
-      size: "512x512",
+      size: "1024x1024",
       n: 1,
-      response_format: "b64_json",
+      response_format: "b64_json"
     });
 
-    const b64 = result?.data?.[0]?.b64_json;
-    if (!b64) throw new Error("No preview image returned by OpenAI");
-
+    const b64 = result.data?.[0]?.b64_json;
+    if (!b64) throw new Error("No preview from OpenAI");
     const previewBase64 = `data:image/png;base64,${b64}`;
 
-    return res.status(200).json({
-      ok: true,
-      previewBase64,
-      // puedes devolver también algún dato útil de debug:
-      debug: {
-        mimeSent: mime,
-        filename,
-        bytes,
-        tookMs: Date.now() - t0,
-      },
-    });
+    res.writeHead(200, { "Content-Type": "application/json", ...CORS_HEADERS });
+    res.end(JSON.stringify({ ok: true, previewBase64 }));
   } catch (e) {
     console.error("Error /api/preview:", e);
-    // Intenta devolver texto crudo si es error OpenAI
-    return res
-      .status(400)
-      .json({ ok: false, error: e?.message || "Preview failed" });
+    res.writeHead(500, { "Content-Type": "application/json", ...CORS_HEADERS });
+    res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
   }
 }
