@@ -1,157 +1,95 @@
-// /api/generate-hd.js
-export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
+// api/generate-hd.js
+import OpenAI from "openai";
+import { toFile } from "openai/uploads";
+import { v2 as cloudinary } from "cloudinary";
 
-const ORIGIN = process.env.ALLOWED_ORIGIN || "*";
-const OPENAI_KEY = process.env.OPENAI_API_KEY;
+export const config = { api: { bodyParser: { sizeLimit: "7mb" } } };
 
-// Cloudinary opcional
-const C_CLOUD = process.env.CLOUDINARY_CLOUD_NAME;
-const C_KEY = process.env.CLOUDINARY_API_KEY;
-const C_SEC = process.env.CLOUDINARY_API_SECRET;
+// --- OpenAI
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", ORIGIN);
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-}
+// --- Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
-function dataUrlToBlob(dataUrl) {
-  const m = /^data:(image\/(png|jpeg|webp));base64,(.+)$/i.exec(dataUrl || "");
-  if (!m) return null;
-  const [, mime, , b64] = m;
-  const buf = Buffer.from(b64, "base64");
-  return new Blob([buf], { type: mime });
-}
-
-async function urlToBlob(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`fetch sourceUrl ${r.status}`);
-  const ct = r.headers.get("content-type") || "";
-  if (!/^image\/(png|jpe?g|webp)$/i.test(ct)) {
-    throw new Error(`unsupported content-type: ${ct}`);
-  }
-  const ab = await r.arrayBuffer();
-  return new Blob([ab], { type: ct });
-}
-
-async function openaiImageEdit({ blob, prompt, size }) {
-  const fd = new FormData();
-  fd.append("model", "gpt-image-1");
-  fd.append("prompt", prompt);
-  fd.append("size", size); // "1024x1024"
-  const ext =
-    blob.type === "image/png"
-      ? "png"
-      : blob.type === "image/webp"
-      ? "webp"
-      : "jpg";
-  fd.append("image", blob, `source.${ext}`);
-
-  const resp = await fetch("https://api.openai.com/v1/images/edits", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENAI_KEY}` },
-    body: fd,
-  });
-
-  const json = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    const msg =
-      json?.error?.message ||
-      `OpenAI error ${resp.status} ${resp.statusText}`;
-    const err = new Error(msg);
-    err.status = resp.status;
-    throw err;
-  }
-
-  const b64 = json?.data?.[0]?.b64_json;
-  if (!b64) throw new Error("No image returned by OpenAI");
-  return `data:image/png;base64,${b64}`;
-}
-
+// Estilos
 const STYLE_PROMPTS = {
-  urban:
-    "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and transparent background. Keep identity and face intact, keep clothing silhouette similar. No text.",
-  comic:
-    "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and muted palette. Preserve identity and expressions. Transparent Background. No text.",
-  cartoon:
-    "Turn the input photo into a vibrant cartoon poster, high contrast, neon accents, crisp outlines. Transparent Background.Preserve identity. No text.",
-  anime:
-    "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Transparent Background.Preserve identity. No text.",
+  urban:   "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones and soft shading. Preserve face and identity. No text.",
+  retro:   "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and a muted palette. Preserve identity. No text.",
+  vibrant: "Turn the input photo into a vibrant cartoon poster with crisp outlines and high contrast. Preserve identity. No text.",
+  anime:   "Turn the input photo into an anime-style character with clean lineart and soft cel shading. Preserve identity. No text."
 };
 
-async function uploadCloudinary(dataUrl) {
-  if (!C_CLOUD || !C_KEY || !C_SEC) return null;
-  const url = `https://api.cloudinary.com/v1_1/${C_CLOUD}/image/upload`;
-
-  // Debes tener un preset firmado o firmar server-side. Como ya estás en server,
-  // subimos con firma básica (timestamp + api_key + secret).
-  const timestamp = Math.floor(Date.now() / 1000);
-  const paramsToSign = `timestamp=${timestamp}${C_SEC}`;
-  const sha1 = await crypto.subtle.digest(
-    "SHA-1",
-    new TextEncoder().encode(paramsToSign)
-  );
-  const signature = Array.from(new Uint8Array(sha1))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-
-  const fd = new FormData();
-  fd.append("file", dataUrl);
-  fd.append("api_key", C_KEY);
-  fd.append("timestamp", String(timestamp));
-  fd.append("signature", signature);
-  fd.append("folder", "mora2/generated_hd");
-
-  const r = await fetch(url, { method: "POST", body: fd });
-  const j = await r.json();
-  if (!r.ok) throw new Error(j?.error?.message || "Cloudinary upload failed");
-  return j.secure_url;
-}
+// Tamaños permitidos por la API actual
+const ALLOWED_SIZES = new Set(["1024x1024", "1024x1536", "1536x1024", "auto"]);
 
 export default async function handler(req, res) {
-  cors(res);
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST")
+  if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
 
   try {
-    if (!OPENAI_KEY) throw new Error("Missing OPENAI_API_KEY");
-    const { imageBase64, sourceUrl, style = "urban" } = req.body || {};
+    let { imageBase64, sourceUrl, style = "urban", size = "1024x1024" } = req.body || {};
+    if (!ALLOWED_SIZES.has(size)) size = "1024x1024";
 
-    let blob = null;
-    if (imageBase64) {
-      blob = dataUrlToBlob(imageBase64);
-      if (!blob) throw new Error("Invalid data URL (imageBase64)");
-    } else if (sourceUrl) {
-      blob = await urlToBlob(sourceUrl);
+    if (!imageBase64 && !sourceUrl) {
+      return res.status(400).json({ ok: false, error: "Provide imageBase64 or sourceUrl" });
+    }
+
+    // ----- prepara archivo para OpenAI
+    let file;
+    if (sourceUrl) {
+      const ab = await fetch(sourceUrl).then(r => r.arrayBuffer());
+      file = await toFile(new Blob([ab], { type: "image/png" }), "source.png");
     } else {
-      return res
-        .status(400)
-        .json({ ok: false, error: "imageBase64 or sourceUrl required" });
+      const ab = await fetch(imageBase64).then(r => r.arrayBuffer());
+      const mime = (imageBase64.match(/^data:(image\/[a-zA-Z+.\-]+);base64,/) || [])[1] || "image/png";
+      file = await toFile(new Blob([ab], { type: mime }), "source");
     }
 
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
-    const hdDataUrl = await openaiImageEdit({
-      blob,
+
+    // ----- genera HD
+    const ai = await openai.images.edits({
+      model: "gpt-image-1",
+      image: file,
       prompt,
-      size: "1024x1024",
+      size,               // <= validado arriba
+      n: 1,
+      response_format: "b64_json"
     });
 
-    // Si hay Cloudinary, subimos y devolvemos URL
+    const hdB64 = ai?.data?.[0]?.b64_json;
+    if (!hdB64) throw new Error("No HD image returned from OpenAI");
+
+    const hdDataUrl = `data:image/png;base64,${hdB64}`;
+
+    // ----- intenta subir a Cloudinary
     let hdUrl = null;
     try {
-      hdUrl = await uploadCloudinary(hdDataUrl);
-    } catch (_) {
-      // si falla Cloudinary, devolvemos base64 igualmente
+      const up = await cloudinary.uploader.upload(hdDataUrl, {
+        folder: "mora2/generated_hd",
+        overwrite: true,
+        resource_type: "image"
+      });
+      hdUrl = up?.secure_url || null;
+      console.log("[generate-hd] Cloudinary upload ok:", { public_id: up?.public_id, secure_url: up?.secure_url });
+    } catch (e) {
+      console.error("[generate-hd] Cloudinary upload failed:", e?.message || e);
     }
 
-    return res
-      .status(200)
-      .json({ ok: true, hdUrl, hdBase64: hdUrl ? undefined : hdDataUrl });
+    // Devolvemos ambos: si hdUrl existe, el front usará URL; si no, usa hdDataUrl como fallback
+    return res.status(200).json({
+      ok: true,
+      size_used: size,
+      hdUrl,
+      hdDataUrl
+    });
   } catch (e) {
-    const status = e.status || 500;
-    return res
-      .status(status)
-      .json({ ok: false, error: String(e.message || e) });
+    console.error("[generate-hd] Fatal:", e?.message || e);
+    return res.status(500).json({ ok: false, error: e?.message || "Internal error" });
   }
 }
