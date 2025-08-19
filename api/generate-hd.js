@@ -3,93 +3,86 @@ import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { v2 as cloudinary } from "cloudinary";
 
+// === CORS ===
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://mora2.com";
+function setCORS(res) {
+  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
 export const config = { api: { bodyParser: { sizeLimit: "7mb" } } };
 
-// --- OpenAI
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// --- Cloudinary
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// Estilos
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 const STYLE_PROMPTS = {
-  urban:   "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones and soft shading. Preserve face and identity. No text.",
-  retro:   "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and a muted palette. Preserve identity. No text.",
-  vibrant: "Turn the input photo into a vibrant cartoon poster with crisp outlines and high contrast. Preserve identity. No text.",
-  anime:   "Turn the input photo into an anime-style character with clean lineart and soft cel shading. Preserve identity. No text."
+  urban:  "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading. Keep identity and face intact, keep clothing silhouette similar. No text.",
+  comic:  "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and muted palette. Preserve identity and expressions. No text.",
+  cartoon:"Turn the input photo into a vibrant cartoon poster, high contrast, neon accents, crisp outlines. Preserve identity. No text.",
+  anime:  "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text."
 };
 
-// Tamaños permitidos por la API actual
-const ALLOWED_SIZES = new Set(["1024x1024", "1024x1536", "1536x1024", "auto"]);
-
 export default async function handler(req, res) {
+  // CORS preflight + headers
+  setCORS(res);
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    return res.status(405).json({ ok:false, error:"Method not allowed" });
   }
 
   try {
-    let { imageBase64, sourceUrl, style = "urban", size = "1024x1024" } = req.body || {};
-    if (!ALLOWED_SIZES.has(size)) size = "1024x1024";
-
+    const { imageBase64, sourceUrl, style = "urban" } = req.body || {};
     if (!imageBase64 && !sourceUrl) {
-      return res.status(400).json({ ok: false, error: "Provide imageBase64 or sourceUrl" });
+      return res.status(400).json({ ok:false, error:"imageBase64 or sourceUrl required" });
     }
 
-    // ----- prepara archivo para OpenAI
+    // 1) Preparar archivo para OpenAI
     let file;
     if (sourceUrl) {
       const ab = await fetch(sourceUrl).then(r => r.arrayBuffer());
       file = await toFile(new Blob([ab], { type: "image/png" }), "source.png");
     } else {
-      const ab = await fetch(imageBase64).then(r => r.arrayBuffer());
-      const mime = (imageBase64.match(/^data:(image\/[a-zA-Z+.\-]+);base64,/) || [])[1] || "image/png";
-      file = await toFile(new Blob([ab], { type: mime }), "source");
+      const [meta, b64] = imageBase64.split(",");
+      const mime = (meta.match(/data:(.*?);base64/) || [])[1] || "image/png";
+      const buf = Buffer.from(b64, "base64");
+      file = await toFile(new Blob([buf], { type: mime }), "source." + (mime.split("/")[1] || "png"));
     }
 
+    // 2) Generar HD (1024x1024 — valores admitidos por la API)
     const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
-
-    // ----- genera HD
-    const ai = await openai.images.edits({
+    const result = await openai.images.edits({
       model: "gpt-image-1",
       image: file,
       prompt,
-      size,               // <= validado arriba
+      size: "1024x1024",
       n: 1,
       response_format: "b64_json"
     });
 
-    const hdB64 = ai?.data?.[0]?.b64_json;
-    if (!hdB64) throw new Error("No HD image returned from OpenAI");
+    const hdB64 = result.data?.[0]?.b64_json;
+    if (!hdB64) throw new Error("No HD from OpenAI");
 
-    const hdDataUrl = `data:image/png;base64,${hdB64}`;
+    // 3) Subir a Cloudinary y devolver URL
+    const uploadRes = await cloudinary.uploader.upload(
+      `data:image/png;base64,${hdB64}`,
+      { folder: "mora2/generated_hd", overwrite: true, resource_type: "image" }
+    );
 
-    // ----- intenta subir a Cloudinary
-    let hdUrl = null;
-    try {
-      const up = await cloudinary.uploader.upload(hdDataUrl, {
-        folder: "mora2/generated_hd",
-        overwrite: true,
-        resource_type: "image"
-      });
-      hdUrl = up?.secure_url || null;
-      console.log("[generate-hd] Cloudinary upload ok:", { public_id: up?.public_id, secure_url: up?.secure_url });
-    } catch (e) {
-      console.error("[generate-hd] Cloudinary upload failed:", e?.message || e);
-    }
+    return res.status(200).json({ ok:true, hdUrl: uploadRes.secure_url });
 
-    // Devolvemos ambos: si hdUrl existe, el front usará URL; si no, usa hdDataUrl como fallback
-    return res.status(200).json({
-      ok: true,
-      size_used: size,
-      hdUrl,
-      hdDataUrl
-    });
   } catch (e) {
-    console.error("[generate-hd] Fatal:", e?.message || e);
-    return res.status(500).json({ ok: false, error: e?.message || "Internal error" });
+    console.error("generate-hd error:", e);
+    return res.status(500).json({ ok:false, error: e.message });
   }
 }
