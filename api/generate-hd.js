@@ -51,12 +51,11 @@ export default async function handler(req, res) {
     }
 
     // 2) Llamar a OpenAI (HD 1024x1024 para cumplir con tamaños permitidos)
-    const form = new FormData();
-    form.append("model", "gpt-image-1");
-    form.append("prompt", STYLE_PROMPTS[style] || STYLE_PROMPTS.urban);
-    form.append("size", "1024x1024");
-    form.append("response_format", "b64_json");
-    form.append("image", fileBlob, "source.png");
+  const form = new FormData();
+form.append("model", "gpt-image-1");
+form.append("prompt", STYLE_PROMPTS[style] || STYLE_PROMPTS.urban);
+form.append("size", "1024x1024");
+form.append("image", fileBlob, "source." + (mime.split("/")[1] || "png"));
 
     const r = await fetch("https://api.openai.com/v1/images/edits", {
       method: "POST",
