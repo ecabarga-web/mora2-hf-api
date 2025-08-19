@@ -38,7 +38,7 @@ async function openaiImageEdit({ blob, prompt, size }) {
   const fd = new FormData();
   fd.append("model", "gpt-image-1");
   fd.append("prompt", prompt);
-  fd.append("size", size); // "2048x2048"
+  fd.append("size", size); // "1024x1024"
   const ext =
     blob.type === "image/png"
       ? "png"
@@ -134,7 +134,7 @@ export default async function handler(req, res) {
     const hdDataUrl = await openaiImageEdit({
       blob,
       prompt,
-      size: "2048x2048",
+      size: "1024x1024",
     });
 
     // Si hay Cloudinary, subimos y devolvemos URL
