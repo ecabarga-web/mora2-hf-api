@@ -34,12 +34,11 @@ export default async function handler(req, res) {
     const buf = Buffer.from(b64, "base64");
     const fileBlob = new Blob([buf], { type: mime });
 
-    const form = new FormData();
-    form.append("model", "gpt-image-1");
-    form.append("prompt", STYLE_PROMPTS[style] || STYLE_PROMPTS.urban);
-    form.append("size", "1024x1024");           // tamaños válidos
-    form.append("response_format", "b64_json");
-    form.append("image", fileBlob, "source." + (mime.split("/")[1] || "png"));
+   const form = new FormData();
+form.append("model", "gpt-image-1");
+form.append("prompt", STYLE_PROMPTS[style] || STYLE_PROMPTS.urban);
+form.append("size", "1024x1024");
+form.append("image", fileBlob, "source." + (mime.split("/")[1] || "png"));
 
     const r = await fetch("https://api.openai.com/v1/images/edits", {
       method: "POST",
