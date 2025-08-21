@@ -36,6 +36,7 @@ function corsHeaders(origin) {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Vary": "Origin",
+    "Access-Control-Max-Age": "86400", // agregado para cachear preflight
   };
 }
 
