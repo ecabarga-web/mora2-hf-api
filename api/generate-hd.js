@@ -1,144 +1,105 @@
 // api/generate-hd.js
-// Genera la versión "HD" (1024x1024) con OpenAI y la sube a Cloudinary.
-// Incluye CORS y acepta dos modos de entrada: {sourceUrl} o {imageBase64 (data URL)}.
+import OpenAI from "openai";
+import { put } from "@vercel/blob";
 
-export const config = { api: { bodyParser: { sizeLimit: "15mb" } } };
+// Permite CORS desde tu dominio
+const ORIGIN = process.env.ALLOWED_ORIGIN || "https://mora2.com";
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
-const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
-const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://mora2.com";
-
-// === Cloudinary SDK (solo uploader) ===
-import { v2 as cloudinary } from "cloudinary";
-cloudinary.config({
-  cloud_name: CLOUDINARY_CLOUD_NAME,
-  api_key: CLOUDINARY_API_KEY,
-  api_secret: CLOUDINARY_API_SECRET,
-});
-
-// === Utiles ===
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+// Helpers
+function cors(res) {
+  res.setHeader("Access-Control-Allow-Origin", ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-function bad(res, code, msg) {
-  return res.status(code).json({ ok: false, error: msg });
-}
-
-const STYLE_PROMPTS = {
-  urban:
-    "Create a clean, stylized urban-street cartoon of the subject. Keep facial identity and proportions consistent. Crisp lines, bold but harmonious colors, subtle shading. No text.",
-  comic:
-    "Create a clean retro comic illustration of the subject with neat inking, controlled halftones and balanced color palette. Preserve identity. No text.",
-  cartoon:
-    "Create a vibrant cartoon poster of the subject. Clean outlines, saturated colors, soft shading. Preserve identity. No text.",
-  anime:
-    "Create an anime-style illustration of the subject with clean cel shading and precise linework. Preserve identity. No text."
-};
-
-// Convierte una data URL a Blob + mime
-function dataUrlToBlob(dataUrl) {
-  const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl || "");
-  if (!m) throw new Error("Invalid data URL");
-  const mime = m[1];
-  const b64 = m[2];
-  const buf = Buffer.from(b64, "base64");
-  return { blob: new Blob([buf], { type: mime }), mime };
-}
-
-// Deriva extensión simple desde mime
-function extFromMime(mime) {
-  if (!mime || typeof mime !== "string") return "png";
-  if (mime.includes("jpeg") || mime.includes("jpg")) return "jpg";
-  if (mime.includes("png")) return "png";
-  if (mime.includes("webp")) return "webp";
-  return "png";
+function dataURLtoBuffer(dataUrl) {
+  // data:image/png;base64,AAAA....
+  const m = /^data:(.+);base64,(.*)$/.exec(dataUrl || "");
+  if (!m) return null;
+  return Buffer.from(m[2], "base64");
 }
 
 export default async function handler(req, res) {
-  setCors(res);
+  cors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return bad(res, 405, "Method not allowed");
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
 
   try {
-    if (!OPENAI_API_KEY) return bad(res, 500, "Missing OPENAI_API_KEY");
-    if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
-      return bad(res, 500, "Cloudinary not configured");
-    }
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    const { imageBase64, sourceUrl, style = "urban" } = req.body || {};
-    if (!imageBase64 && !sourceUrl) {
-      return bad(res, 400, "Provide sourceUrl or imageBase64 (data URL)");
-    }
+    const { imageBase64, sourceUrl, style, size } = req.body || {};
+    // Por políticas actuales del Image API, los tamaños válidos:
+    const finalSize = size && ["1024x1024","1024x1536","1536x1024","auto"].includes(size)
+      ? size
+      : "1024x1024";
 
-    // --- Normalizamos a Blob + mime + filename ---
-    let fileBlob, mime, filename;
-
+    // 1) Obtenemos la imagen fuente (buffer) desde dataURL o desde URL
+    let srcBuffer = null;
     if (imageBase64) {
-      // Viene como data URL
-      const r = dataUrlToBlob(imageBase64);
-      fileBlob = r.blob;
-      mime = r.mime;
-      filename = "source." + extFromMime(mime);
-    } else {
-      // Viene como URL (ej. Cloudinary / GHL storage)
-      const resp = await fetch(sourceUrl);
-      if (!resp.ok) throw new Error(`Cannot fetch sourceUrl (${resp.status})`);
-      const ct = resp.headers.get("content-type") || "image/png";
-      const ab = await resp.arrayBuffer();
-      fileBlob = new Blob([ab], { type: ct });
-      mime = ct; // ⬅️ ahora SÍ tenemos mime definido
-      filename = "source." + extFromMime(mime);
+      srcBuffer = dataURLtoBuffer(imageBase64);
+    } else if (sourceUrl) {
+      const r = await fetch(sourceUrl);
+      const ab = await r.arrayBuffer();
+      srcBuffer = Buffer.from(ab);
+    }
+    if (!srcBuffer) {
+      return res.status(400).json({ ok: false, error: "Missing source image" });
     }
 
-    // --- Llamada a OpenAI Images (edits) ---
-    // Usamos fetch con FormData nativo; NO incluir response_format (da 400).
-    const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
+    // 2) Llamada a OpenAI (usa tu prompt actual para HD)
+    //    Mantengo la misma lógica que ya te funcionaba: "edits" con una única imagen.
+    const prompt =
+      `Clean vector-style cartoon portrait, no background (transparent), face likeness preserved, ` +
+      `smooth outlines, soft cell shading, no artifacts, print-ready for t-shirt. Style: ${style || "urban"}`;
 
-    const form = new FormData();
-    form.append("model", "gpt-image-1");
-    form.append("prompt", prompt);
-    form.append("size", "1024x1024"); // valores soportados
-    form.append("image", fileBlob, filename);
-
-    const oa = await fetch("https://api.openai.com/v1/images/edits", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`
-      },
-      body: form
+    // La API v1 de images (Node SDK) usa formData con file. Aquí cargamos el buffer como file.
+    const result = await openai.images.edits({
+      image: srcBuffer,                // <-- tu foto
+      prompt,
+      size: finalSize,                 // "1024x1024" etc
+      response_format: "b64_json",     // devolvemos base64 para guardar luego
+      background: "transparent"        // intenta transparencia cuando sea posible
     });
 
-    if (!oa.ok) {
-      const text = await oa.text().catch(() => "");
-      return bad(res, oa.status, text || "OpenAI error");
+    const b64 = result?.data?.[0]?.b64_json;
+    if (!b64) {
+      return res.status(500).json({ ok: false, error: "OpenAI no devolvió imagen HD" });
     }
 
-    const j = await oa.json();
-    const b64 = j?.data?.[0]?.b64_json;
-    if (!b64) return bad(res, 500, "No image returned from OpenAI");
+    // 3) Guardamos en Vercel Blob como PNG público
+    const fileBuf = Buffer.from(b64, "base64");
+    const fileName = `mora2/generated_hd/hd_${Date.now()}.png`;
 
-    // --- Subimos a Cloudinary (y devolvemos hdUrl) ---
-    const upload = await cloudinary.uploader.upload(
-      `data:image/png;base64,${b64}`,
-      {
-        folder: "mora2/generated_hd",
-        overwrite: true,
-        resource_type: "image",
-        public_id: `hd_${Date.now()}`
-      }
-    );
+    const { url } = await put(fileName, fileBuf, {
+      access: "public",
+      contentType: "image/png",
+      addRandomSuffix: false, // clave estable (ya usamos timestamp)
+    });
 
-    const hdUrl = upload?.secure_url;
-    if (!hdUrl) return bad(res, 500, "HD generated but no URL");
+    // 4) (Opcional) Notificar a GHL con el URL de la HD: descomenta si ya tienes el webhook
+    /*
+    const ghlWebhook = process.env.GHL_WEBHOOK_URL;
+    if (ghlWebhook) {
+      // Manda lo que necesites: contactoId, nombre, email, estilo, hdUrl...
+      await fetch(ghlWebhook, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: "mora2",
+          style,
+          hdUrl: url,
+          // contactId, name, email... lo que envíes desde el front
+        })
+      });
+    }
+    */
 
-    return res.status(200).json({ ok: true, hdUrl });
+    return res.status(200).json({ ok: true, hdUrl: url });
   } catch (err) {
-    console.error("Error /api/generate-hd:", err);
-    return bad(res, 500, err.message || "Internal error");
+    console.error("generate-hd error:", err);
+    const msg = err?.message || "Server error";
+    return res.status(500).json({ ok: false, error: msg });
   }
 }
