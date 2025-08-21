@@ -3,19 +3,20 @@ import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { put } from "@vercel/blob";
 
-// === HOTFIX CORS (abierto) ===
-function getCorsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Max-Age": "86400",
-    Vary: "Origin",
-  };
-}
-
+// ====== CONFIG ======
 export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
 
+// Seguridad: define aquí qué orígenes permites en producción
+const ALLOWED_ORIGINS = new Set([
+  "https://mora2.com",
+  "https://www.mora2.com",
+  // Durante pruebas, puedes añadir tu domain de preview (quítalo luego):
+  // "https://mora2-hf-api-jbh6.vercel.app"
+]);
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ====== Estilos que ya veníamos usando ======
 const STYLE_PROMPTS = {
   urban:
     "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
@@ -27,25 +28,35 @@ const STYLE_PROMPTS = {
     "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
 };
 
-function stylePrompt(style) {
-  return STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
+// ====== Helpers CORS ======
+function corsHeaders(origin) {
+  const allowOrigin = origin && ALLOWED_ORIGINS.has(origin) ? origin : undefined;
+  return {
+    ...(allowOrigin ? { "Access-Control-Allow-Origin": allowOrigin } : {}),
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Vary": "Origin",
+  };
 }
 
+// ====== Helpers de imagen ======
 function parseDataUrl(dataUrl) {
   const m = /^data:(image\/(?:png|jpeg|jpg|webp));base64,(.+)$/i.exec(dataUrl || "");
   if (!m) return null;
   const mime = m[1].toLowerCase();
   const b64 = m[2];
-  return { mime, buf: Buffer.from(b64, "base64") };
+  const buf = Buffer.from(b64, "base64");
+  return { mime, buf };
 }
 
 async function fetchAsTypedBlob(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`fetch sourceUrl failed (${r.status})`);
   const ct = (r.headers.get("content-type") || "").toLowerCase();
+  // Sólo permitimos formatos soportados por gpt-image-1
   const mime =
     ct.includes("image/png") ? "image/png" :
-    (ct.includes("image/jpeg") || ct.includes("image/jpg")) ? "image/jpeg" :
+    ct.includes("image/jpeg") || ct.includes("image/jpg") ? "image/jpeg" :
     ct.includes("image/webp") ? "image/webp" :
     null;
   if (!mime) throw new Error(`Unsupported mime from sourceUrl (${ct || "unknown"})`);
@@ -53,52 +64,55 @@ async function fetchAsTypedBlob(url) {
   return new Blob([ab], { type: mime });
 }
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+function stylePrompt(style) {
+  return STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
+}
 
+// ====== Handler ======
 export default async function handler(req, res) {
-  const headers = getCorsHeaders();
-
-  // Preflight
+  // CORS preflight
   if (req.method === "OPTIONS") {
-    return res.status(200).set(headers).end();
+    return res.status(200).set(corsHeaders(req.headers.origin)).end();
   }
-
-  // GET de diagnóstico
-  if (req.method === "GET") {
-    return res.status(200).set(headers).json({
-      ok: true,
-      route: "generate-hd",
-      time: new Date().toISOString(),
-    });
-  }
-
   if (req.method !== "POST") {
-    return res.status(405).set(headers).json({ ok: false, error: "Method not allowed" });
+    return res
+      .status(405)
+      .set(corsHeaders(req.headers.origin))
+      .json({ ok: false, error: "Method not allowed" });
   }
 
   const started = Date.now();
-
   try {
     const { sourceUrl, imageBase64, style = "urban" } = req.body || {};
     if (!sourceUrl && !imageBase64) {
-      return res.status(400).set(headers).json({ ok: false, error: "Provide sourceUrl or imageBase64 (data URL)" });
+      return res
+        .status(400)
+        .set(corsHeaders(req.headers.origin))
+        .json({ ok: false, error: "Provide sourceUrl or imageBase64 (data URL)" });
     }
 
-    // Normaliza a File
+    // 1) Normalizamos la imagen de entrada a un File con MIME correcto
     let fileForOpenAI;
+
     if (sourceUrl) {
       const blob = await fetchAsTypedBlob(sourceUrl);
+      // la extensión la maneja OpenAI internamente; "source" basta
       fileForOpenAI = await toFile(blob, "source");
     } else {
+      // data URL → Buffer → Blob tipado
       const parsed = parseDataUrl(imageBase64);
       if (!parsed) {
-        return res.status(400).set(headers).json({ ok: false, error: "Invalid data URL in imageBase64" });
+        return res
+          .status(400)
+          .set(corsHeaders(req.headers.origin))
+          .json({ ok: false, error: "Invalid data URL in imageBase64" });
       }
-      const blob = new Blob([parsed.buf], { type: "image/png" }); // tipamos a png
+      const { mime, buf } = parsed;
+      const blob = new Blob([buf], { type: mime });
       fileForOpenAI = await toFile(blob, "source");
     }
 
-    // OpenAI HD (1024)
+    // 2) Generamos HD 1024 con OpenAI (mismo modelo/flujo que ya te funcionó)
     const prompt = stylePrompt(style);
     const result = await openai.images.edits({
       model: "gpt-image-1",
@@ -111,24 +125,47 @@ export default async function handler(req, res) {
     const b64 = result?.data?.[0]?.b64_json;
     if (!b64) throw new Error("No HD image from OpenAI");
 
-    // Sube a Vercel Blob
+    // 3) Subimos a Vercel Blob (público)
     const bytes = Buffer.from(b64, "base64");
-    const key = `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
+    const stamp = Date.now();
+    const key = `mora2/hd_${stamp}_${Math.random().toString(36).slice(2)}.png`;
 
     const putRes = await put(key, bytes, {
       contentType: "image/png",
       access: "public",
+      // cacheControl: "public, max-age=31536000, immutable",
     });
 
-    return res.status(200).set(headers).json({
-      ok: true,
-      hdUrl: putRes.url,
-      hdKey: putRes.pathname || key,
-      tookMs: Date.now() - started,
-    });
+    // (Opcional útil) guardamos metadatos junto a la imagen
+    const metaKey = key.replace(/\.png$/, ".json");
+    await put(
+      metaKey,
+      JSON.stringify({
+        style,
+        createdAt: new Date(stamp).toISOString(),
+        hdKey: key,
+        hdUrl: putRes.url,
+      }),
+      { contentType: "application/json", access: "public" }
+    );
+
+    // 4) Respuesta
+    return res
+      .status(200)
+      .set(corsHeaders(req.headers.origin))
+      .json({
+        ok: true,
+        hdUrl: putRes.url,
+        hdKey: putRes.pathname || key,
+        tookMs: Date.now() - started,
+      });
 
   } catch (e) {
     console.error("Error /api/generate-hd:", e);
-    return res.status(500).set(headers).json({ ok: false, error: e?.message || String(e) });
+    const message = e?.message || String(e);
+    return res
+      .status(500)
+      .set(corsHeaders(req.headers.origin))
+      .json({ ok: false, error: message });
   }
 }
