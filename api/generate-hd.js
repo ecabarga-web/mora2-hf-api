@@ -3,32 +3,19 @@ import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { put } from "@vercel/blob";
 
-// ====== CONFIG ======
-export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
-
-// ====== CORS (una sola vez) ======
-const ALLOWED_ORIGINS = new Set([
-  "https://mora2.com",
-  "https://www.mora2.com",
-]);
-
-function getCorsHeaders(_origin) {
-  // Hotfix: CORS abierto para validar. Luego lo cerramos a tu dominio.
+// === HOTFIX CORS (abierto) ===
+function getCorsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
-    "Vary": "Origin",
+    Vary: "Origin",
   };
-};
-  return allow ? { ...base, "Access-Control-Allow-Origin": allow } : base;
 }
 
-// ====== OpenAI ======
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
 
-// ====== Estilos ======
 const STYLE_PROMPTS = {
   urban:
     "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
@@ -40,14 +27,16 @@ const STYLE_PROMPTS = {
     "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
 };
 
-// ====== Helpers imagen ======
+function stylePrompt(style) {
+  return STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
+}
+
 function parseDataUrl(dataUrl) {
   const m = /^data:(image\/(?:png|jpeg|jpg|webp));base64,(.+)$/i.exec(dataUrl || "");
   if (!m) return null;
   const mime = m[1].toLowerCase();
   const b64 = m[2];
-  const buf = Buffer.from(b64, "base64");
-  return { mime, buf };
+  return { mime, buf: Buffer.from(b64, "base64") };
 }
 
 async function fetchAsTypedBlob(url) {
@@ -56,7 +45,7 @@ async function fetchAsTypedBlob(url) {
   const ct = (r.headers.get("content-type") || "").toLowerCase();
   const mime =
     ct.includes("image/png") ? "image/png" :
-    ct.includes("image/jpeg") || ct.includes("image/jpg") ? "image/jpeg" :
+    (ct.includes("image/jpeg") || ct.includes("image/jpg")) ? "image/jpeg" :
     ct.includes("image/webp") ? "image/webp" :
     null;
   if (!mime) throw new Error(`Unsupported mime from sourceUrl (${ct || "unknown"})`);
@@ -64,34 +53,38 @@ async function fetchAsTypedBlob(url) {
   return new Blob([ab], { type: mime });
 }
 
-function stylePrompt(style) {
-  return STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
-}
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ====== Handler ======
 export default async function handler(req, res) {
-  // --- CORS preflight y método no permitido ---
+  const headers = getCorsHeaders();
+
+  // Preflight
   if (req.method === "OPTIONS") {
-    return res.status(200).set(getCorsHeaders(req.headers.origin)).end();
+    return res.status(200).set(headers).end();
   }
+
+  // GET de diagnóstico
+  if (req.method === "GET") {
+    return res.status(200).set(headers).json({
+      ok: true,
+      route: "generate-hd",
+      time: new Date().toISOString(),
+    });
+  }
+
   if (req.method !== "POST") {
-    return res
-      .status(405)
-      .set(getCorsHeaders(req.headers.origin))
-      .json({ ok: false, error: "Method not allowed" });
+    return res.status(405).set(headers).json({ ok: false, error: "Method not allowed" });
   }
 
   const started = Date.now();
+
   try {
     const { sourceUrl, imageBase64, style = "urban" } = req.body || {};
     if (!sourceUrl && !imageBase64) {
-      return res
-        .status(400)
-        .set(getCorsHeaders(req.headers.origin))
-        .json({ ok: false, error: "Provide sourceUrl or imageBase64 (data URL)" });
+      return res.status(400).set(headers).json({ ok: false, error: "Provide sourceUrl or imageBase64 (data URL)" });
     }
 
-    // 1) Normaliza imagen de entrada
+    // Normaliza a File
     let fileForOpenAI;
     if (sourceUrl) {
       const blob = await fetchAsTypedBlob(sourceUrl);
@@ -99,17 +92,13 @@ export default async function handler(req, res) {
     } else {
       const parsed = parseDataUrl(imageBase64);
       if (!parsed) {
-        return res
-          .status(400)
-          .set(getCorsHeaders(req.headers.origin))
-          .json({ ok: false, error: "Invalid data URL in imageBase64" });
+        return res.status(400).set(headers).json({ ok: false, error: "Invalid data URL in imageBase64" });
       }
-      const { mime, buf } = parsed;
-      const blob = new Blob([buf], { type: mime });
+      const blob = new Blob([parsed.buf], { type: "image/png" }); // tipamos a png
       fileForOpenAI = await toFile(blob, "source");
     }
 
-    // 2) Genera HD con OpenAI
+    // OpenAI HD (1024)
     const prompt = stylePrompt(style);
     const result = await openai.images.edits({
       model: "gpt-image-1",
@@ -122,7 +111,7 @@ export default async function handler(req, res) {
     const b64 = result?.data?.[0]?.b64_json;
     if (!b64) throw new Error("No HD image from OpenAI");
 
-    // 3) Sube a Vercel Blob (público)
+    // Sube a Vercel Blob
     const bytes = Buffer.from(b64, "base64");
     const key = `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
 
@@ -131,23 +120,15 @@ export default async function handler(req, res) {
       access: "public",
     });
 
-    // 4) Respuesta OK
-    return res
-      .status(200)
-      .set(getCorsHeaders(req.headers.origin))
-      .json({
-        ok: true,
-        hdUrl: putRes.url,
-        hdKey: putRes.pathname || key,
-        tookMs: Date.now() - started,
-      });
+    return res.status(200).set(headers).json({
+      ok: true,
+      hdUrl: putRes.url,
+      hdKey: putRes.pathname || key,
+      tookMs: Date.now() - started,
+    });
 
   } catch (e) {
     console.error("Error /api/generate-hd:", e);
-    const message = e?.message || String(e);
-    return res
-      .status(500)
-      .set(getCorsHeaders(req.headers.origin))
-      .json({ ok: false, error: message });
+    return res.status(500).set(headers).json({ ok: false, error: e?.message || String(e) });
   }
 }
