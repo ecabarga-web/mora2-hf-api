@@ -2,7 +2,22 @@
 // Genera la PREVIEW (baja) con OpenAI y SIEMPRE devuelve headers CORS.
 
 import OpenAI from "openai";
+// ===== CORS allow list (pegar debajo de imports) =====
+const ALLOWED_ORIGINS = new Set([
+  "https://mora2.com",
+  "https://www.mora2.com",
+]);
 
+function getCorsHeaders(origin) {
+  const allow =
+    origin && ALLOWED_ORIGINS.has(origin) ? origin : "";
+  const base = {
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    Vary: "Origin",
+  };
+  return allow ? { ...base, "Access-Control-Allow-Origin": allow } : base;
+}
 export const config = { api: { bodyParser: { sizeLimit: "7mb" } } };
 
 // === CORS: dominios permitidos ===
