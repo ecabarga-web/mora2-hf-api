@@ -2,7 +2,22 @@
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { put } from "@vercel/blob";
+// ===== CORS allow list (pegar debajo de imports) =====
+const ALLOWED_ORIGINS = new Set([
+  "https://mora2.com",
+  "https://www.mora2.com",
+]);
 
+function getCorsHeaders(origin) {
+  const allow =
+    origin && ALLOWED_ORIGINS.has(origin) ? origin : "";
+  const base = {
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    Vary: "Origin",
+  };
+  return allow ? { ...base, "Access-Control-Allow-Origin": allow } : base;
+}
 // ====== CONFIG ======
 export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
 
@@ -72,6 +87,15 @@ function stylePrompt(style) {
 // ====== Handler ======
 export default async function handler(req, res) {
   // CORS preflight
+  if (req.method === "OPTIONS") {
+  return res.status(200).set(getCorsHeaders(req.headers.origin)).end();
+}
+if (req.method !== "POST") {
+  return res
+    .status(405)
+    .set(getCorsHeaders(req.headers.origin))
+    .json({ ok: false, error: "Method not allowed" });
+}
   if (req.method === "OPTIONS") {
     return res.status(200).set(corsHeaders(req.headers.origin)).end();
   }
