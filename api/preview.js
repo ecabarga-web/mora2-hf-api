@@ -62,6 +62,16 @@ function stylePrompt(style) {
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 export default async function handler(req, res) {
+  // --- CORS preflight ---
+if (req.method === "OPTIONS") {
+  return res.status(200).set(getCorsHeaders(req.headers.origin)).end();
+}
+if (req.method !== "POST") {
+  return res
+    .status(405)
+    .set(getCorsHeaders(req.headers.origin))
+    .json({ ok: false, error: "Method not allowed" });
+}
   const origin = req.headers.origin;
   const headers = corsHeaders(origin);
 
