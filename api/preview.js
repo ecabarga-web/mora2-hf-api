@@ -9,13 +9,14 @@ const ALLOWED_ORIGINS = new Set([
   "https://www.mora2.com",
 ]);
 
-function getCorsHeaders(origin) {
-  const allow = origin && ALLOWED_ORIGINS.has(origin) ? origin : "";
-  const base = {
+function getCorsHeaders(_origin) {
+  // Hotfix: CORS abierto para validar. Luego lo cerramos a tu dominio.
+  return {
+    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
-    Vary: "Origin",
+    "Vary": "Origin",
   };
   return allow ? { ...base, "Access-Control-Allow-Origin": allow } : base;
 }
