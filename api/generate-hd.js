@@ -3,6 +3,8 @@ import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { put } from "@vercel/blob";
 
+const BLOB_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;   // <-- NUEVO
+
 // ====== CONFIG ======
 export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
 
@@ -53,7 +55,6 @@ async function fetchAsTypedBlob(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`fetch sourceUrl failed (${r.status})`);
   const ct = (r.headers.get("content-type") || "").toLowerCase();
-  // Sólo permitimos formatos soportados por gpt-image-1
   const mime =
     ct.includes("image/png") ? "image/png" :
     ct.includes("image/jpeg") || ct.includes("image/jpg") ? "image/jpeg" :
@@ -96,10 +97,8 @@ export default async function handler(req, res) {
 
     if (sourceUrl) {
       const blob = await fetchAsTypedBlob(sourceUrl);
-      // la extensión la maneja OpenAI internamente; "source" basta
       fileForOpenAI = await toFile(blob, "source");
     } else {
-      // data URL → Buffer → Blob tipado
       const parsed = parseDataUrl(imageBase64);
       if (!parsed) {
         return res
@@ -112,7 +111,7 @@ export default async function handler(req, res) {
       fileForOpenAI = await toFile(blob, "source");
     }
 
-    // 2) Generamos HD 1024 con OpenAI (mismo modelo/flujo que ya te funcionó)
+    // 2) Generamos HD 1024 con OpenAI
     const prompt = stylePrompt(style);
     const result = await openai.images.edits({
       model: "gpt-image-1",
@@ -127,27 +126,13 @@ export default async function handler(req, res) {
 
     // 3) Subimos a Vercel Blob (público)
     const bytes = Buffer.from(b64, "base64");
-    const stamp = Date.now();
-    const key = `mora2/hd_${stamp}_${Math.random().toString(36).slice(2)}.png`;
+    const key = `mora2/generated_hd/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
 
     const putRes = await put(key, bytes, {
       contentType: "image/png",
       access: "public",
-      // cacheControl: "public, max-age=31536000, immutable",
+      token: BLOB_TOKEN,       // <-- CLAVE: usar el token del env var
     });
-
-    // (Opcional útil) guardamos metadatos junto a la imagen
-    const metaKey = key.replace(/\.png$/, ".json");
-    await put(
-      metaKey,
-      JSON.stringify({
-        style,
-        createdAt: new Date(stamp).toISOString(),
-        hdKey: key,
-        hdUrl: putRes.url,
-      }),
-      { contentType: "application/json", access: "public" }
-    );
 
     // 4) Respuesta
     return res
