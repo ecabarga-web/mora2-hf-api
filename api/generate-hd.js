@@ -2,36 +2,31 @@
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { put } from "@vercel/blob";
-// ===== CORS allow list (pegar debajo de imports) =====
+
+// ====== CONFIG ======
+export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
+
+// ====== CORS (una sola vez) ======
 const ALLOWED_ORIGINS = new Set([
   "https://mora2.com",
   "https://www.mora2.com",
 ]);
 
 function getCorsHeaders(origin) {
-  const allow =
-    origin && ALLOWED_ORIGINS.has(origin) ? origin : "";
+  const allow = origin && ALLOWED_ORIGINS.has(origin) ? origin : "";
   const base = {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400",
     Vary: "Origin",
   };
   return allow ? { ...base, "Access-Control-Allow-Origin": allow } : base;
 }
-// ====== CONFIG ======
-export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
 
-// Seguridad: define aquí qué orígenes permites en producción
-const ALLOWED_ORIGINS = new Set([
-  "https://mora2.com",
-  "https://www.mora2.com",
-  // Durante pruebas, puedes añadir tu domain de preview (quítalo luego):
-  // "https://mora2-hf-api-jbh6.vercel.app"
-]);
-
+// ====== OpenAI ======
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ====== Estilos que ya veníamos usando ======
+// ====== Estilos ======
 const STYLE_PROMPTS = {
   urban:
     "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
@@ -43,19 +38,7 @@ const STYLE_PROMPTS = {
     "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
 };
 
-// ====== Helpers CORS ======
-function corsHeaders(origin) {
-  const allowOrigin = origin && ALLOWED_ORIGINS.has(origin) ? origin : undefined;
-  return {
-    ...(allowOrigin ? { "Access-Control-Allow-Origin": allowOrigin } : {}),
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Vary": "Origin",
-    "Access-Control-Max-Age": "86400", // agregado para cachear preflight
-  };
-}
-
-// ====== Helpers de imagen ======
+// ====== Helpers imagen ======
 function parseDataUrl(dataUrl) {
   const m = /^data:(image\/(?:png|jpeg|jpg|webp));base64,(.+)$/i.exec(dataUrl || "");
   if (!m) return null;
@@ -69,7 +52,6 @@ async function fetchAsTypedBlob(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`fetch sourceUrl failed (${r.status})`);
   const ct = (r.headers.get("content-type") || "").toLowerCase();
-  // Sólo permitimos formatos soportados por gpt-image-1
   const mime =
     ct.includes("image/png") ? "image/png" :
     ct.includes("image/jpeg") || ct.includes("image/jpg") ? "image/jpeg" :
@@ -86,23 +68,14 @@ function stylePrompt(style) {
 
 // ====== Handler ======
 export default async function handler(req, res) {
-  // CORS preflight
+  // --- CORS preflight y método no permitido ---
   if (req.method === "OPTIONS") {
-  return res.status(200).set(getCorsHeaders(req.headers.origin)).end();
-}
-if (req.method !== "POST") {
-  return res
-    .status(405)
-    .set(getCorsHeaders(req.headers.origin))
-    .json({ ok: false, error: "Method not allowed" });
-}
-  if (req.method === "OPTIONS") {
-    return res.status(200).set(corsHeaders(req.headers.origin)).end();
+    return res.status(200).set(getCorsHeaders(req.headers.origin)).end();
   }
   if (req.method !== "POST") {
     return res
       .status(405)
-      .set(corsHeaders(req.headers.origin))
+      .set(getCorsHeaders(req.headers.origin))
       .json({ ok: false, error: "Method not allowed" });
   }
 
@@ -112,24 +85,21 @@ if (req.method !== "POST") {
     if (!sourceUrl && !imageBase64) {
       return res
         .status(400)
-        .set(corsHeaders(req.headers.origin))
+        .set(getCorsHeaders(req.headers.origin))
         .json({ ok: false, error: "Provide sourceUrl or imageBase64 (data URL)" });
     }
 
-    // 1) Normalizamos la imagen de entrada a un File con MIME correcto
+    // 1) Normaliza imagen de entrada
     let fileForOpenAI;
-
     if (sourceUrl) {
       const blob = await fetchAsTypedBlob(sourceUrl);
-      // la extensión la maneja OpenAI internamente; "source" basta
       fileForOpenAI = await toFile(blob, "source");
     } else {
-      // data URL → Buffer → Blob tipado
       const parsed = parseDataUrl(imageBase64);
       if (!parsed) {
         return res
           .status(400)
-          .set(corsHeaders(req.headers.origin))
+          .set(getCorsHeaders(req.headers.origin))
           .json({ ok: false, error: "Invalid data URL in imageBase64" });
       }
       const { mime, buf } = parsed;
@@ -137,34 +107,32 @@ if (req.method !== "POST") {
       fileForOpenAI = await toFile(blob, "source");
     }
 
-    // 2) Generamos HD 1024 con OpenAI (mismo modelo/flujo que ya te funcionó)
+    // 2) Genera HD con OpenAI
     const prompt = stylePrompt(style);
     const result = await openai.images.edits({
       model: "gpt-image-1",
       image: fileForOpenAI,
       prompt,
-      size: "1024x1024", // valores permitidos actuales
+      size: "1024x1024",
       n: 1,
-      // no uses response_format: el SDK moderno retorna b64_json por defecto en edits
     });
 
     const b64 = result?.data?.[0]?.b64_json;
     if (!b64) throw new Error("No HD image from OpenAI");
 
-    // 3) Subimos a Vercel Blob (público)
+    // 3) Sube a Vercel Blob (público)
     const bytes = Buffer.from(b64, "base64");
     const key = `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
 
     const putRes = await put(key, bytes, {
       contentType: "image/png",
       access: "public",
-      // si quieres forzar cache: cacheControl: "public, max-age=31536000, immutable",
     });
 
-    // 4) Respuesta
+    // 4) Respuesta OK
     return res
       .status(200)
-      .set(corsHeaders(req.headers.origin))
+      .set(getCorsHeaders(req.headers.origin))
       .json({
         ok: true,
         hdUrl: putRes.url,
@@ -174,11 +142,10 @@ if (req.method !== "POST") {
 
   } catch (e) {
     console.error("Error /api/generate-hd:", e);
-    // devolvemos mensaje legible (y CORS)
     const message = e?.message || String(e);
     return res
       .status(500)
-      .set(corsHeaders(req.headers.origin))
+      .set(getCorsHeaders(req.headers.origin))
       .json({ ok: false, error: message });
   }
 }
