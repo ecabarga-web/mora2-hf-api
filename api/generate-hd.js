@@ -101,14 +101,16 @@ export default async function handler(req, res) {
     const j = await r.json();
 if (!r.ok) {
   return res.status(r.status)
-    .set(corsHeaders(req.headers.origin))
+    setCORS(res);
+return res.status(XXX).json({ ... });
     .json({ ok:false, error: j.error?.message || "OpenAI error" });
 }
 
 const b64 = j?.data?.[0]?.b64_json;
 if (!b64) {
   return res.status(500)
-    .set(corsHeaders(req.headers.origin))
+    setCORS(res);
+return res.status(XXX).json({ ... });
     .json({ ok:false, error: "No HD image returned" });
 }
 
@@ -123,7 +125,8 @@ const putRes = await put(key, bytes, {
 
 // ⚠️ No devolvemos hdUrl al navegador
 return res.status(200)
-  .set(corsHeaders(req.headers.origin))
+  setCORS(res);
+return res.status(XXX).json({ ... });
   .json({
     ok: true,
     stored: true,
