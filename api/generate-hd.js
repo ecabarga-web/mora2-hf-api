@@ -1,10 +1,9 @@
 // api/generate-hd.js
-// Genera la versión HD usando el endpoint HTTP de OpenAI (sin SDK)
-// y sube el PNG resultante a Vercel Blob.
+// Promociona la imagen del preview (guardada en Blob) a una ruta final.
+// Si no llega draftKey, cae al flujo anterior de generación (fallback).
 
 import { put } from "@vercel/blob";
 
-// ===== CORS (mismo patrón que preview.js) =====
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://mora2.com";
 function setCORS(res) {
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
@@ -14,10 +13,8 @@ function setCORS(res) {
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-// ====== CONFIG ======
 export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
 
-// ====== Estilos ======
 const STYLE_PROMPTS = {
   urban:
     "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
@@ -29,11 +26,10 @@ const STYLE_PROMPTS = {
     "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
 };
 
+// (helpers que ya tenías si quieres fallback con OpenAI)
 function stylePrompt(style) {
   return STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
 }
-
-// ===== Helpers imagen =====
 function parseDataUrl(dataUrl) {
   const m = /^data:(image\/(?:png|jpeg|jpg|webp));base64,(.+)$/i.exec(dataUrl || "");
   if (!m) return null;
@@ -42,7 +38,6 @@ function parseDataUrl(dataUrl) {
   const buf = Buffer.from(b64, "base64");
   return { mime, buf };
 }
-
 async function fetchAsTypedBlob(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`fetch sourceUrl failed (${r.status})`);
@@ -57,9 +52,7 @@ async function fetchAsTypedBlob(url) {
   return new Blob([ab], { type: mime });
 }
 
-// ===== Handler =====
 export default async function handler(req, res) {
-  // CORS
   setCORS(res);
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok:false, error:"Method not allowed" });
@@ -67,59 +60,77 @@ export default async function handler(req, res) {
   const started = Date.now();
 
   try {
-    const { sourceUrl, imageBase64, style = "urban" } = req.body || {};
-    if (!sourceUrl && !imageBase64) {
-      return res.status(400).json({ ok:false, error:"Provide sourceUrl or imageBase64 (data URL)" });
+    const { draftKey, sourceUrl, imageBase64, style = "urban" } = req.body || {};
+
+    // RUTA PRINCIPAL: tenemos draftKey → copiamos a ruta final (idéntica al preview)
+    if (draftKey) {
+      // Descargamos el borrador desde Blob (URL pública derivable)
+      // Nota: no devolvemos la URL al cliente.
+      const publicDraftUrl = `https://blob.vercel-storage.com${draftKey}`;
+      const r = await fetch(publicDraftUrl);
+      if (!r.ok) throw new Error(`fetch draft failed (${r.status})`);
+      const bytes = Buffer.from(await r.arrayBuffer());
+      const finalKey = `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
+
+      const putRes = await put(finalKey, bytes, {
+        contentType: "image/png",
+        access: "public",
+      });
+
+      return res.status(200).json({
+        ok: true,
+        // NO devolvemos URL pública a cliente
+        hdKey: putRes.pathname || finalKey,
+        tookMs: Date.now() - started,
+        used: "draft", // para debug
+      });
     }
 
-    // 1) Preparamos el archivo para OpenAI (Blob tipado)
+    // FALLBACK (si por alguna razón no llegó draftKey) → tu flujo anterior
+    // 1) Normalizar imagen
     let imageBlob;
     if (sourceUrl) {
       imageBlob = await fetchAsTypedBlob(sourceUrl);
-    } else {
+    } else if (imageBase64) {
       const parsed = parseDataUrl(imageBase64);
       if (!parsed) return res.status(400).json({ ok:false, error:"Invalid data URL in imageBase64" });
       const { mime, buf } = parsed;
       imageBlob = new Blob([buf], { type: mime });
+    } else {
+      return res.status(400).json({ ok:false, error:"Provide draftKey or sourceUrl or imageBase64" });
     }
 
-    // 2) Llamamos al endpoint HTTP /v1/images/edits
     const form = new FormData();
     form.append("model", "gpt-image-1");
     form.append("prompt", stylePrompt(style));
     form.append("size", "1024x1024");
-    // nombre de archivo cualquiera con extensión acorde al mime
     const ext = (imageBlob.type.split("/")[1] || "png").replace("jpeg","jpg");
     form.append("image", imageBlob, `source.${ext}`);
 
-    const r = await fetch("https://api.openai.com/v1/images/edits", {
+    const r2 = await fetch("https://api.openai.com/v1/images/edits", {
       method: "POST",
       headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
       body: form
     });
-
-    const j = await r.json();
-    if (!r.ok) {
-      return res.status(r.status).json({ ok:false, error: j.error?.message || "OpenAI error" });
+    const j2 = await r2.json();
+    if (!r2.ok) {
+      return res.status(r2.status).json({ ok:false, error: j2.error?.message || "OpenAI error" });
     }
-
-    const b64 = j?.data?.[0]?.b64_json;
+    const b64 = j2?.data?.[0]?.b64_json;
     if (!b64) throw new Error("No HD image returned");
 
-    // 3) Subimos a Vercel Blob **en PRIVADO** (no exponemos URL pública)
     const bytes = Buffer.from(b64, "base64");
-    const key = `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
-    const putRes = await put(key, bytes, {
+    const finalKey = `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
+    const putRes = await put(finalKey, bytes, {
       contentType: "image/png",
-      access: "public", // <-- clave: PUBLICO
+      access: "public",
     });
 
-    // 4) Respuesta OK **sin hdUrl** (no entregamos la imagen al cliente)
     return res.status(200).json({
       ok: true,
-      // NOTA: no devolvemos hdUrl a propósito
-      hdKey: putRes.pathname || key,
+      hdKey: putRes.pathname || finalKey,
       tookMs: Date.now() - started,
+      used: "fallback",
     });
 
   } catch (e) {
