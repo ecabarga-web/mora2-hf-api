@@ -99,20 +99,37 @@ export default async function handler(req, res) {
     });
 
     const j = await r.json();
-    if (!r.ok) {
-      return res.status(r.status).json({ ok:false, error: j.error?.message || "OpenAI error" });
-    }
+if (!r.ok) {
+  return res.status(r.status)
+    .set(corsHeaders(req.headers.origin))
+    .json({ ok:false, error: j.error?.message || "OpenAI error" });
+}
 
-    const b64 = j?.data?.[0]?.b64_json;
-    if (!b64) throw new Error("No HD image returned");
+const b64 = j?.data?.[0]?.b64_json;
+if (!b64) {
+  return res.status(500)
+    .set(corsHeaders(req.headers.origin))
+    .json({ ok:false, error: "No HD image returned" });
+}
 
-    // 3) Subimos a Vercel Blob (público)
-    const bytes = Buffer.from(b64, "base64");
-    const key = `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
-    const putRes = await put(key, bytes, {
-      contentType: "image/png",
-      access: "public",
-    });
+// Subimos a Vercel Blob (público) PERO no devolvemos la URL al cliente
+const bytes = Buffer.from(b64, "base64");
+const key = `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
+
+const putRes = await put(key, bytes, {
+  contentType: "image/png",
+  access: "public"
+});
+
+// ⚠️ No devolvemos hdUrl al navegador
+return res.status(200)
+  .set(corsHeaders(req.headers.origin))
+  .json({
+    ok: true,
+    stored: true,
+    // opcional: referencia interna por si la quieres loguear o asociar al pedido
+    hdKey: putRes.pathname || key
+  });
 
     // 4) Respuesta OK
     return res.status(200).json({
