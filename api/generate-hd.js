@@ -3,22 +3,22 @@ import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { put } from "@vercel/blob";
 
-const BLOB_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;   // <-- NUEVO
+// ===== CORS (igual que preview.js) =====
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://mora2.com";
+function setCORS(res) {
+  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
 
 // ====== CONFIG ======
 export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
 
-// Seguridad: define aquí qué orígenes permites en producción
-const ALLOWED_ORIGINS = new Set([
-  "https://mora2.com",
-  "https://www.mora2.com",
-  // Durante pruebas, puedes añadir tu domain de preview (quítalo luego):
-  // "https://mora2-hf-api-jbh6.vercel.app"
-]);
-
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ====== Estilos que ya veníamos usando ======
+// ====== Estilos ======
 const STYLE_PROMPTS = {
   urban:
     "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
@@ -30,18 +30,7 @@ const STYLE_PROMPTS = {
     "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
 };
 
-// ====== Helpers CORS ======
-function corsHeaders(origin) {
-  const allowOrigin = origin && ALLOWED_ORIGINS.has(origin) ? origin : undefined;
-  return {
-    ...(allowOrigin ? { "Access-Control-Allow-Origin": allowOrigin } : {}),
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Vary": "Origin",
-  };
-}
-
-// ====== Helpers de imagen ======
+// ===== Helpers imagen =====
 function parseDataUrl(dataUrl) {
   const m = /^data:(image\/(?:png|jpeg|jpg|webp));base64,(.+)$/i.exec(dataUrl || "");
   if (!m) return null;
@@ -69,49 +58,34 @@ function stylePrompt(style) {
   return STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
 }
 
-// ====== Handler ======
+// ===== Handler =====
 export default async function handler(req, res) {
-  // CORS preflight
-  if (req.method === "OPTIONS") {
-    return res.status(200).set(corsHeaders(req.headers.origin)).end();
-  }
-  if (req.method !== "POST") {
-    return res
-      .status(405)
-      .set(corsHeaders(req.headers.origin))
-      .json({ ok: false, error: "Method not allowed" });
-  }
+  // CORS SIEMPRE
+  setCORS(res);
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "POST") return res.status(405).json({ ok:false, error:"Method not allowed" });
 
   const started = Date.now();
   try {
     const { sourceUrl, imageBase64, style = "urban" } = req.body || {};
     if (!sourceUrl && !imageBase64) {
-      return res
-        .status(400)
-        .set(corsHeaders(req.headers.origin))
-        .json({ ok: false, error: "Provide sourceUrl or imageBase64 (data URL)" });
+      return res.status(400).json({ ok:false, error:"Provide sourceUrl or imageBase64 (data URL)" });
     }
 
-    // 1) Normalizamos la imagen de entrada a un File con MIME correcto
+    // 1) Normalizamos la imagen de entrada
     let fileForOpenAI;
-
     if (sourceUrl) {
       const blob = await fetchAsTypedBlob(sourceUrl);
       fileForOpenAI = await toFile(blob, "source");
     } else {
       const parsed = parseDataUrl(imageBase64);
-      if (!parsed) {
-        return res
-          .status(400)
-          .set(corsHeaders(req.headers.origin))
-          .json({ ok: false, error: "Invalid data URL in imageBase64" });
-      }
+      if (!parsed) return res.status(400).json({ ok:false, error:"Invalid data URL in imageBase64" });
       const { mime, buf } = parsed;
       const blob = new Blob([buf], { type: mime });
       fileForOpenAI = await toFile(blob, "source");
     }
 
-    // 2) Generamos HD 1024 con OpenAI
+    // 2) Generamos HD (1024) con OpenAI
     const prompt = stylePrompt(style);
     const result = await openai.images.edits({
       model: "gpt-image-1",
@@ -124,33 +98,24 @@ export default async function handler(req, res) {
     const b64 = result?.data?.[0]?.b64_json;
     if (!b64) throw new Error("No HD image from OpenAI");
 
-    // 3) Subimos a Vercel Blob (público)
+    // 3) Subida a Vercel Blob (público)
     const bytes = Buffer.from(b64, "base64");
-    const key = `mora2/generated_hd/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
-
+    const key = `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
     const putRes = await put(key, bytes, {
       contentType: "image/png",
       access: "public",
-      token: BLOB_TOKEN,       // <-- CLAVE: usar el token del env var
     });
 
-    // 4) Respuesta
-    return res
-      .status(200)
-      .set(corsHeaders(req.headers.origin))
-      .json({
-        ok: true,
-        hdUrl: putRes.url,
-        hdKey: putRes.pathname || key,
-        tookMs: Date.now() - started,
-      });
+    // 4) OK
+    return res.status(200).json({
+      ok: true,
+      hdUrl: putRes.url,
+      hdKey: putRes.pathname || key,
+      tookMs: Date.now() - started,
+    });
 
   } catch (e) {
     console.error("Error /api/generate-hd:", e);
-    const message = e?.message || String(e);
-    return res
-      .status(500)
-      .set(corsHeaders(req.headers.origin))
-      .json({ ok: false, error: message });
+    return res.status(500).json({ ok:false, error: e?.message || String(e) });
   }
 }
