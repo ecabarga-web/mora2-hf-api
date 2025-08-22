@@ -111,7 +111,7 @@ export default async function handler(req, res) {
     const key = `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
     const putRes = await put(key, bytes, {
       contentType: "image/png",
-      access: "private", // <-- clave: PRIVADO
+      access: "public", // <-- clave: PUBLICO
     });
 
     // 4) Respuesta OK **sin hdUrl** (no entregamos la imagen al cliente)
