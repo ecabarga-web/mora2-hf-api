@@ -1,8 +1,8 @@
 // api/preview.js
 // Genera la PREVIEW (baja) usando el endpoint HTTP de OpenAI (sin SDK)
+// y guarda el resultado en un Blob temporal para que la HD sea idéntica.
 
-import { put } from "@vercel/blob";                         // <-- NUEVO
-const BLOB_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;       // <-- NUEVO
+import { put } from "@vercel/blob";
 
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://mora2.com";
 function setCORS(res) {
@@ -32,9 +32,9 @@ export default async function handler(req, res) {
     if (!imageBase64) return res.status(400).json({ ok:false, error:"imageBase64 required (data URL)" });
 
     // dataURL -> Blob
-    const [meta, b64] = imageBase64.split(",");
+    const [meta, b64in] = imageBase64.split(",");
     const mime = (meta.match(/data:(.*?);base64/) || [])[1] || "image/png";
-    const buf = Buffer.from(b64, "base64");
+    const buf = Buffer.from(b64in, "base64");
     const fileBlob = new Blob([buf], { type: mime });
 
     const form = new FormData();
@@ -57,20 +57,18 @@ export default async function handler(req, res) {
     const b64json = j.data?.[0]?.b64_json;
     if (!b64json) throw new Error("No preview image returned");
 
-    // === GUARDAR EN VERCEL BLOB (NUEVO) ===
+    // Guardamos la MISMA imagen generada como borrador en Blob
     const bytes = Buffer.from(b64json, "base64");
-    const key = `mora2/previews/prev_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
-    const putRes = await put(key, bytes, {
-      access: "public",
+    const draftKey = `mora2/tmp_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
+    const putRes = await put(draftKey, bytes, {
       contentType: "image/png",
-      token: BLOB_TOKEN,           // <-- CLAVE: usar el token del env var
+      access: "public", // público, pero NO devolvemos URL al cliente
     });
 
     return res.status(200).json({
       ok: true,
       previewBase64: `data:image/png;base64,${b64json}`,
-      previewUrl: putRes.url,      // <-- URL pública en Blob (para GHL / CRM)
-      previewKey: putRes.pathname, // opcional, por si quieres indexar por clave
+      draftKey: putRes.pathname || draftKey, // ← devolvemos la CLAVE temporal
     });
   } catch (e) {
     console.error("preview error:", e);
