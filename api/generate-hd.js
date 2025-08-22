@@ -1,9 +1,10 @@
 // api/generate-hd.js
-import OpenAI from "openai";
-import { toFile } from "openai/uploads";
+// Genera la versión HD usando el endpoint HTTP de OpenAI (sin SDK)
+// y sube el PNG resultante a Vercel Blob.
+
 import { put } from "@vercel/blob";
 
-// ===== CORS (igual que preview.js) =====
+// ===== CORS (mismo patrón que preview.js) =====
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://mora2.com";
 function setCORS(res) {
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
@@ -16,8 +17,6 @@ function setCORS(res) {
 // ====== CONFIG ======
 export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
 // ====== Estilos ======
 const STYLE_PROMPTS = {
   urban:
@@ -29,6 +28,10 @@ const STYLE_PROMPTS = {
   anime:
     "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
 };
+
+function stylePrompt(style) {
+  return STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
+}
 
 // ===== Helpers imagen =====
 function parseDataUrl(dataUrl) {
@@ -54,51 +57,56 @@ async function fetchAsTypedBlob(url) {
   return new Blob([ab], { type: mime });
 }
 
-function stylePrompt(style) {
-  return STYLE_PROMPTS[style] || STYLE_PROMPTS.urban;
-}
-
 // ===== Handler =====
 export default async function handler(req, res) {
-  // CORS SIEMPRE
+  // CORS
   setCORS(res);
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok:false, error:"Method not allowed" });
 
   const started = Date.now();
+
   try {
     const { sourceUrl, imageBase64, style = "urban" } = req.body || {};
     if (!sourceUrl && !imageBase64) {
       return res.status(400).json({ ok:false, error:"Provide sourceUrl or imageBase64 (data URL)" });
     }
 
-    // 1) Normalizamos la imagen de entrada
-    let fileForOpenAI;
+    // 1) Preparamos el archivo para OpenAI (Blob tipado)
+    let imageBlob;
     if (sourceUrl) {
-      const blob = await fetchAsTypedBlob(sourceUrl);
-      fileForOpenAI = await toFile(blob, "source");
+      imageBlob = await fetchAsTypedBlob(sourceUrl);
     } else {
       const parsed = parseDataUrl(imageBase64);
       if (!parsed) return res.status(400).json({ ok:false, error:"Invalid data URL in imageBase64" });
       const { mime, buf } = parsed;
-      const blob = new Blob([buf], { type: mime });
-      fileForOpenAI = await toFile(blob, "source");
+      imageBlob = new Blob([buf], { type: mime });
     }
 
-    // 2) Generamos HD (1024) con OpenAI
-    const prompt = stylePrompt(style);
-    const result = await openai.images.edits({
-      model: "gpt-image-1",
-      image: fileForOpenAI,
-      prompt,
-      size: "1024x1024",
-      n: 1,
+    // 2) Llamamos al endpoint HTTP /v1/images/edits
+    const form = new FormData();
+    form.append("model", "gpt-image-1");
+    form.append("prompt", stylePrompt(style));
+    form.append("size", "1024x1024");
+    // nombre de archivo cualquiera con extensión acorde al mime
+    const ext = (imageBlob.type.split("/")[1] || "png").replace("jpeg","jpg");
+    form.append("image", imageBlob, `source.${ext}`);
+
+    const r = await fetch("https://api.openai.com/v1/images/edits", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      body: form
     });
 
-    const b64 = result?.data?.[0]?.b64_json;
-    if (!b64) throw new Error("No HD image from OpenAI");
+    const j = await r.json();
+    if (!r.ok) {
+      return res.status(r.status).json({ ok:false, error: j.error?.message || "OpenAI error" });
+    }
 
-    // 3) Subida a Vercel Blob (público)
+    const b64 = j?.data?.[0]?.b64_json;
+    if (!b64) throw new Error("No HD image returned");
+
+    // 3) Subimos a Vercel Blob (público)
     const bytes = Buffer.from(b64, "base64");
     const key = `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}.png`;
     const putRes = await put(key, bytes, {
@@ -106,7 +114,7 @@ export default async function handler(req, res) {
       access: "public",
     });
 
-    // 4) OK
+    // 4) Respuesta OK
     return res.status(200).json({
       ok: true,
       hdUrl: putRes.url,
