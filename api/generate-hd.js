@@ -75,6 +75,40 @@ export default async function handler(req, res) {
     if (!sourceUrl && !imageBase64) {
       return res.status(400).json({ ok:false, error:"Provide sourceUrl or imageBase64 (data URL)" });
     }
+    // === FAST PATH: si viene la preview y piden congelarla, no regeneramos ===
+if (
+  req.body?.freezePreview &&
+  imageBase64 &&
+  typeof imageBase64 === "string" &&
+  imageBase64.startsWith("data:image/")
+) {
+  const parsed = parseDataUrl(imageBase64);
+  if (!parsed) {
+    return res.status(400).json({ ok:false, error:"Invalid preview data URL" });
+  }
+
+  const { mime, buf } = parsed;
+
+  // Si vino draftKey válido lo usamos para el nombre, si no generamos uno
+  const safeDraft =
+    draftKey && /^[a-zA-Z0-9._-]{3,80}$/.test(draftKey)
+      ? `mora2/${draftKey}`
+      : `mora2/hd_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+  const key = `${safeDraft}.png`;
+
+  const putRes = await put(key, buf, {
+    contentType: mime || "image/png",
+    access: "public",
+  });
+
+  return res.status(200).json({
+    ok: true,
+    hdUrl: putRes.url,
+    hdKey: putRes.pathname || key,
+    tookMs: Date.now() - started,
+  });
+}
 
     // --- Normalizar imagen de entrada ---
     let imageBlob = null;
