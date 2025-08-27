@@ -49,10 +49,22 @@ export default async function handler(req, res) {
       body: form
     });
 
-    const j = await r.json();
-    if (!r.ok) {
-      return res.status(r.status).json({ ok:false, error: j.error?.message || "OpenAI error" });
-    }
+  const j = await r.json();
+if (!r.ok) {
+  return res.status(r.status).json({ ok:false, error: j.error?.message || "OpenAI error" });
+}
+
+const b64json = j.data?.[0]?.b64_json;
+if (!b64json) throw new Error("No preview image returned");
+
+// ⚠️ IMPORTANTE: NO persistimos el preview.
+// Devolvemos la imagen inline para que el frontend la pinte en el canvas.
+res.setHeader("Cache-Control", "no-store"); // opcional: evita cache
+
+return res.status(200).json({
+  ok: true,
+  previewBase64: `data:image/png;base64,${b64json}`
+});
 
     const b64json = j.data?.[0]?.b64_json;
     if (!b64json) throw new Error("No preview image returned");
