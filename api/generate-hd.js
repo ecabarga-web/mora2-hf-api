@@ -17,16 +17,19 @@ function setCORS(res) {
 // ====== CONFIG ======
 export const config = { api: { bodyParser: { sizeLimit: "12mb" } } };
 
-// ====== Estilos ======
+// ===== Estilos (nueva lista) =====
 const STYLE_PROMPTS = {
   urban:
-    "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, and a flat background. Keep identity and face intact, keep clothing silhouette similar. No text.",
-  retro:
-    "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines and muted palette. Preserve identity and expressions. No text.",
-  vibrant:
-    "Turn the input photo into a vibrant cartoon poster, high contrast, neon accents, crisp outlines. Preserve identity. No text.",
+    "Turn the input photo into a bold urban-street cartoon portrait. Clean thick inking, saturated yet balanced colors, subtle halftones, soft shading, flat/plain background. Keep identity, face features, glasses and hair/beard intact. Shoulders-up framing. No text, no typography.",
+
+  pixar:
+    "Transform the input photo into a Pixar-style character render. Big expressive eyes, soft 3D-like shading, smooth gradients, gentle subsurface scattering, glossy eye highlights, soft rim light, simple studio background. Preserve identity and likeness. Shoulders-up. No text, no captions.",
+
+  realista:
+    "Turn the input photo into a realistic cartoon with strong graphic lines and flat shadows, similar to a graphic-novel poster. Thick outlines, warm neutral palette, defined beard and hair strands, subtle rim light, light vignette/plain background. Maintain exact identity, glasses reflections allowed. Shoulders-up framing. No text.",
+
   anime:
-    "Turn the input photo into an anime-style character with big expressive eyes, soft cel shading, and clean lineart. Preserve identity. No text.",
+    "Turn the input photo into an anime-style cel-shaded character with clean lineart, clear color blocks, subtle gradients, and simple background. Preserve identity and expression. Shoulders-up. No text."
 };
 
 function stylePrompt(style) {
