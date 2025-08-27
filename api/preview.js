@@ -16,9 +16,9 @@ function setCORS(res) {
 export const config = { api: { bodyParser: { sizeLimit: "7mb" } } };
 
 const STYLE_PROMPTS = {
-  urban:  "Turn the input photo into a bold urban-street cartoon illustration with clean inking, saturated colors, subtle halftones, soft shading, flat/plain background. Keep identity intact. No text.",
-  comic:  "Turn the input photo into a retro comic-book illustration with vintage halftones, inked outlines, muted palette. Preserve identity. No text.",
-  cartoon:"Turn the input photo into a vibrant cartoon poster with crisp outlines and saturated colors. Preserve identity. No text.",
+  urban:  "Turn the input photo into a bold urban-street cartoon portrait. Clean thick inking, saturated yet balanced colors, subtle halftones, soft shading, flat/plain background. Keep identity, face features, glasses and hair/beard intact. Shoulders-up framing. No text, no typography.",
+  pixar:  "Transform the input photo into a Pixar-style character render. Big expressive eyes, soft 3D-like shading, smooth gradients, gentle subsurface scattering, glossy eye highlights, soft rim light, simple studio background. Preserve identity and likeness. Shoulders-up. No text, no captions.",
+  realista: "Turn the input photo into a realistic cartoon with strong graphic lines and flat shadows, similar to a graphic-novel poster. Thick outlines, warm neutral palette, defined beard and hair strands, subtle rim light, light vignette/plain background. Maintain exact identity, glasses reflections allowed. Shoulders-up framing. No text.",
   anime:  "Turn the input photo into an anime-style cel-shaded character with clean lineart. Preserve identity. No text."
 };
 
